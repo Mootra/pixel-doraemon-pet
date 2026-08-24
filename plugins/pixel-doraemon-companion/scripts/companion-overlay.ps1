@@ -43,6 +43,8 @@ $pidPath = Join-Path $DataRoot "overlay.pid"
 $usageStatePath = Join-Path $DataRoot "usage-state.json"
 $usagePidPath = Join-Path $DataRoot "usage-monitor.pid"
 $usageRefreshRequestPath = Join-Path $DataRoot "usage-refresh.request"
+$lookDirectionPath = Join-Path $PluginRoot "scripts\look-direction.ps1"
+. $lookDirectionPath
 
 $script:defaultConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $defaultConfigPath | ConvertFrom-Json
 $script:config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
@@ -312,8 +314,8 @@ $script:lastFrameAt = [DateTime]::UtcNow
 $script:paused = $false
 $script:lastSpritePollAt = [DateTime]::MinValue
 $script:lookFrame = -1
-$script:lookCandidate = -1
-$script:lookCandidateSince = [DateTime]::MinValue
+$script:lookActive = $false
+$script:lastLookStepAt = [DateTime]::MinValue
 $script:lastUsageStamp = $null
 $script:lastUsageMonitorCheck = [DateTime]::MinValue
 
@@ -476,55 +478,63 @@ function Start-TemporaryAction([string]$Action) {
     $script:lastFrameAt = [DateTime]::UtcNow
 }
 
-function Get-LookFrame {
+function Get-CursorPointInDip {
     $cursor = [System.Windows.Forms.Cursor]::Position
-    $centerX = $window.Left + ($window.Width / 2)
-    $centerY = $window.Top + ($window.Height / 2)
-    $dx = $cursor.X - $centerX
-    $dy = $cursor.Y - $centerY
-    $distance = [Math]::Sqrt(($dx * $dx) + ($dy * $dy))
-    $lookDistance = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookDistance")
-    if ($distance -lt $lookDistance) { return -1 }
+    $point = New-Object System.Windows.Point([double]$cursor.X, [double]$cursor.Y)
+    $source = [System.Windows.PresentationSource]::FromVisual($window)
+    if ($null -ne $source -and $null -ne $source.CompositionTarget) {
+        return $source.CompositionTarget.TransformFromDevice.Transform($point)
+    }
+    return $point
+}
 
-    $degrees = [Math]::Atan2($dx, -$dy) * 180.0 / [Math]::PI
-    if ($degrees -lt 0) { $degrees += 360.0 }
-    return [int]([Math]::Round($degrees / 22.5) % 16)
+function Get-LookGeometry {
+    $cursor = Get-CursorPointInDip
+    $originXRatio = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookOriginX")
+    $originYRatio = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookOriginY")
+    $spriteLeft = $window.Left + ($window.Width - $spriteDisplayWidth)
+    $spriteTop = $window.Top + $usagePanelHeight
+    $originX = $spriteLeft + ($spriteDisplayWidth * $originXRatio)
+    $originY = $spriteTop + ($spriteDisplayHeight * $originYRatio)
+    $dx = $cursor.X - $originX
+    $dy = $cursor.Y - $originY
+
+    return [pscustomobject]@{
+        Dx = $dx
+        Dy = $dy
+        Distance = [Math]::Sqrt(($dx * $dx) + ($dy * $dy))
+        Degrees = Get-LookAngleDegrees -Dx $dx -Dy $dy
+    }
 }
 
 function Get-StableLookFrame {
-    $target = Get-LookFrame
+    $geometry = Get-LookGeometry
     $now = [DateTime]::UtcNow
-    if ($target -lt 0) {
+    $enterDistance = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookEnterDistance") * $scale
+    $exitDistance = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookExitDistance") * $scale
+
+    if (-not $script:lookActive) {
+        if ($geometry.Distance -lt $enterDistance) { return -1 }
+        $script:lookActive = $true
+    } elseif ($geometry.Distance -lt $exitDistance) {
+        $script:lookActive = $false
         $script:lookFrame = -1
-        $script:lookCandidate = -1
+        $script:lastLookStepAt = [DateTime]::MinValue
         return -1
     }
+
+    $hysteresis = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookHysteresisDegrees")
+    $target = Get-LookFrameForAngle -Degrees $geometry.Degrees -CurrentFrame $script:lookFrame -HysteresisDegrees $hysteresis
     if ($script:lookFrame -lt 0) {
         $script:lookFrame = $target
-        $script:lookCandidate = $target
-        $script:lookCandidateSince = $now
-        return $script:lookFrame
-    }
-    if ($target -eq $script:lookFrame) {
-        $script:lookCandidate = $target
-        $script:lookCandidateSince = $now
-        return $script:lookFrame
-    }
-    if ($target -ne $script:lookCandidate) {
-        $script:lookCandidate = $target
-        $script:lookCandidateSince = $now
+        $script:lastLookStepAt = $now
         return $script:lookFrame
     }
 
-    $settleMs = [int](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookSettleMs")
-    if (($now - $script:lookCandidateSince).TotalMilliseconds -ge $settleMs) {
-        $clockwiseSteps = ($target - $script:lookFrame + 16) % 16
-        $counterClockwiseSteps = ($script:lookFrame - $target + 16) % 16
-        if ($clockwiseSteps -le $counterClockwiseSteps) {
-            $script:lookFrame = ($script:lookFrame + 1) % 16
-        } else {
-            $script:lookFrame = ($script:lookFrame + 15) % 16
-        }
+    $stepMs = [int](Get-ConfigValue $script:config.window $script:defaultConfig.window "cursorLookStepMs")
+    if ($target -ne $script:lookFrame -and ($now - $script:lastLookStepAt).TotalMilliseconds -ge $stepMs) {
+        $script:lookFrame = Get-NextLookFrame -CurrentFrame $script:lookFrame -TargetFrame $target
+        $script:lastLookStepAt = $now
     }
     return $script:lookFrame
 }
@@ -798,7 +808,7 @@ $stateTimer.Add_Tick({
 })
 
 $animationTimer = New-Object System.Windows.Threading.DispatcherTimer
-$animationTimer.Interval = [TimeSpan]::FromMilliseconds(70)
+$animationTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $animationTimer.Add_Tick({
     $now = [DateTime]::UtcNow
     if ($script:temporaryAction -and $now -ge $script:temporaryUntil) {
@@ -816,6 +826,10 @@ $animationTimer.Add_Tick({
             Set-Frame "look" $lookFrame
             return
         }
+    } else {
+        $script:lookActive = $false
+        $script:lookFrame = -1
+        $script:lastLookStepAt = [DateTime]::MinValue
     }
 
     if (-not $script:paused) {

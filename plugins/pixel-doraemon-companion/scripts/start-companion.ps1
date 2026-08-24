@@ -12,16 +12,24 @@ function Get-CodexHome {
 }
 
 function Get-ActivePluginRoot {
-    $cacheRoot = Join-Path (Get-CodexHome) "plugins\cache\personal\pixel-doraemon-companion"
+    $currentRoot = Split-Path -Parent $PSScriptRoot
+    if (Test-Path -LiteralPath (Join-Path $currentRoot "hooks\pet-event.ps1")) {
+        return $currentRoot
+    }
+
+    $cacheRoot = Join-Path (Get-CodexHome) "plugins\cache"
     if (Test-Path -LiteralPath $cacheRoot) {
         $candidate = Get-ChildItem -LiteralPath $cacheRoot -Directory |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
+            Where-Object { $_.Name -eq "pixel-doraemon-companion" } |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
             Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "hooks\pet-event.ps1") } |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
         if ($null -ne $candidate) { return $candidate.FullName }
     }
 
-    return (Split-Path -Parent $PSScriptRoot)
+    return $currentRoot
 }
 
 $pluginRoot = Get-ActivePluginRoot

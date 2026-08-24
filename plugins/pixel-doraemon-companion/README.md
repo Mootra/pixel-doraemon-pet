@@ -20,9 +20,10 @@ overlay visible at the same time.
 - Idle: look toward the cursor using the v2 direction rows.
 - Sprite updates: prefer the separately installed `pixel-doraemon-v3` PNG, poll for
   changes, and fall back to the plugin's bundled atlas.
-- Motion: use per-frame v2 timing, a short cursor-direction settle window, and
-  shortest-path one-frame look stepping so turns pass through intermediate poses
-  instead of snapping directly to a distant direction.
+- Motion: calculate cursor direction from Doraemon's head center in DPI-corrected
+  screen coordinates, use separate enter/exit distances plus angular hysteresis
+  to prevent edge jitter, and advance along the shortest one-frame path every
+  50 ms so moving cursors do not stall the gaze.
 - Usage bubble: show the lowest live remaining percentage as the main number,
   list every active limit window below it, and keep reset times in the tooltip.
   Data comes from the local Codex App Server and does not read or store account
@@ -36,7 +37,7 @@ automatic refresh interval (60 seconds by default) and is clamped to at least
 15 seconds.
 
 New defaults remain available to older user configs: missing asset, timing,
-cursor-settle, or usage settings are read from `default-config.json`. The
+cursor-follow, or usage settings are read from `default-config.json`. The
 right-click menu can refresh the atlas or request a fresh Codex usage snapshot.
 
 Codex requires plugin hooks to be reviewed and trusted before they run. The

@@ -2,8 +2,12 @@
   "window": {
     "scale": 0.85,
     "topmost": true,
-    "cursorLookDistance": 105,
-    "cursorLookSettleMs": 110
+    "cursorLookOriginX": 0.52,
+    "cursorLookOriginY": 0.34,
+    "cursorLookEnterDistance": 72,
+    "cursorLookExitDistance": 52,
+    "cursorLookHysteresisDegrees": 3.5,
+    "cursorLookStepMs": 50
   },
   "asset": {
     "preferInstalledCodexPet": true,
