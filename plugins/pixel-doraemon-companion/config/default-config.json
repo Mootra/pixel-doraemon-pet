@@ -1,0 +1,78 @@
+{
+  "window": {
+    "scale": 0.85,
+    "topmost": true,
+    "cursorLookDistance": 105,
+    "cursorLookSettleMs": 110
+  },
+  "asset": {
+    "preferInstalledCodexPet": true,
+    "petId": "pixel-doraemon-v3",
+    "bundledPath": "assets\\spritesheet.png",
+    "reloadPollMs": 1500
+  },
+  "usage": {
+    "enabled": true,
+    "pollMs": 60000,
+    "showResetTime": true
+  },
+  "frameDurationMs": {
+    "idle": 520,
+    "running-right": 210,
+    "running-left": 210,
+    "waving": 340,
+    "jumping": 320,
+    "failed": 430,
+    "waiting": 520,
+    "running": 360,
+    "review": 500,
+    "look": 420
+  },
+  "frameDurationsMs": {
+    "idle": [280, 110, 110, 140, 140, 320],
+    "running-right": [120, 120, 120, 120, 120, 120, 120, 220],
+    "running-left": [120, 120, 120, 120, 120, 120, 120, 220],
+    "waving": [140, 140, 140, 280],
+    "jumping": [140, 140, 140, 140, 280],
+    "failed": [140, 140, 140, 140, 140, 140, 140, 240],
+    "waiting": [150, 150, 150, 150, 150, 260],
+    "running": [120, 120, 120, 120, 120, 220],
+    "review": [150, 150, 150, 150, 150, 280]
+  },
+  "holdMs": {
+    "SessionStart": 800,
+    "UserPromptSubmit": 2600,
+    "PreToolUse": 1800,
+    "PermissionRequest": 30000,
+    "PostToolUseSuccess": 1500,
+    "PostToolUseFailure": 3600,
+    "Stop": 3000,
+    "Click": 2400
+  },
+  "eventRules": {
+    "SessionStart": [
+      { "action": "idle", "weight": 1.0 }
+    ],
+    "UserPromptSubmit": [
+      { "action": "review", "weight": 1.0 }
+    ],
+    "PreToolUse": [
+      { "action": "review", "weight": 0.65 },
+      { "action": "running", "weight": 0.35 }
+    ],
+    "PermissionRequest": [
+      { "action": "waiting", "weight": 1.0 }
+    ],
+    "PostToolUseSuccess": [
+      { "action": "idle", "weight": 0.7 },
+      { "action": "running", "weight": 0.3 }
+    ],
+    "PostToolUseFailure": [
+      { "action": "failed", "weight": 1.0 }
+    ],
+    "Stop": [
+      { "action": "waving", "weight": 0.6 },
+      { "action": "jumping", "weight": 0.4 }
+    ]
+  }
+}

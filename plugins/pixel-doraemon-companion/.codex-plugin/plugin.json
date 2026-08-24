@@ -1,0 +1,23 @@
+{
+  "name": "pixel-doraemon-companion",
+  "version": "0.3.0+codex.20260824014618",
+  "description": "Interactive Pixel Doraemon overlay driven by Codex lifecycle events.",
+  "author": {
+    "name": "Local developer"
+  },
+  "interface": {
+    "displayName": "Pixel Doraemon Companion",
+    "shortDescription": "Interactive Codex-aware desktop pet",
+    "longDescription": "Maps Codex lifecycle events to an optional Pixel Doraemon V3 overlay with live remaining-usage display, installed-pet asset sync, per-frame timing, smooth shortest-path cursor-looking directions, weighted prop triggers, and click interactions.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Local automation"
+    ],
+    "defaultPrompt": [
+      "Show me how to configure Pixel Doraemon Companion."
+    ],
+    "brandColor": "#0062D3"
+  }
+}

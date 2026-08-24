@@ -1,0 +1,25 @@
+# Local Codex and workspace state
+.codex/
+.tmp-appserver-schema/
+**/.data/
+*.pid
+
+# Large generation workspaces and source references
+run/
+references/
+final/
+/scripts/
+
+# Legacy local package retained only for non-overwrite comparison
+output/
+
+# Superseded local QA renders
+qa/*.png
+!qa/companion-quota-bubble-compact-preview.png
+
+# Python and OS noise
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+desktop.ini
