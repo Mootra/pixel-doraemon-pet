@@ -149,6 +149,18 @@ if ($ValidateOnly) {
     return
 }
 
+$script:singleInstanceMutex = New-Object System.Threading.Mutex($false, "Local\PixelDoraemonCompanion.Overlay")
+$script:ownsSingleInstanceMutex = $false
+try {
+    $script:ownsSingleInstanceMutex = $script:singleInstanceMutex.WaitOne(0, $false)
+} catch [System.Threading.AbandonedMutexException] {
+    $script:ownsSingleInstanceMutex = $true
+}
+if (-not $script:ownsSingleInstanceMutex) {
+    $script:singleInstanceMutex.Dispose()
+    return
+}
+
 $window = New-Object System.Windows.Window
 $window.WindowStyle = [System.Windows.WindowStyle]::None
 $window.ResizeMode = [System.Windows.ResizeMode]::NoResize
@@ -847,6 +859,11 @@ $window.Add_Closed({
     $animationTimer.Stop()
     Remove-Item -LiteralPath $pidPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $usageRefreshRequestPath -ErrorAction SilentlyContinue
+    if ($script:ownsSingleInstanceMutex) {
+        $script:singleInstanceMutex.ReleaseMutex()
+        $script:ownsSingleInstanceMutex = $false
+    }
+    $script:singleInstanceMutex.Dispose()
 })
 
 New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null

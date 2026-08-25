@@ -36,13 +36,27 @@ $pluginRoot = Get-ActivePluginRoot
 $dataRoot = Join-Path $pluginRoot ".data"
 $pidPath = Join-Path $dataRoot "overlay.pid"
 
-if ($Restart -and (Test-Path -LiteralPath $pidPath)) {
-    $overlayPid = Get-Content -LiteralPath $pidPath -Encoding ASCII -ErrorAction SilentlyContinue
-    if ($overlayPid) {
-        Stop-Process -Id $overlayPid -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 250
+function Get-RunningCompanionOverlays {
+    try {
+        return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.ProcessId -ne $PID -and
+            $_.CommandLine -match ' -File ".*companion-overlay\.ps1"' -and
+            $_.CommandLine -like '*pixel-doraemon-companion*'
+        })
+    } catch {
+        return @()
     }
+}
+
+$runningOverlays = @(Get-RunningCompanionOverlays)
+if ($Restart) {
+    foreach ($overlay in $runningOverlays) {
+        Stop-Process -Id $overlay.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($runningOverlays.Count -gt 0) { Start-Sleep -Milliseconds 250 }
     Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+} elseif ($runningOverlays.Count -gt 0) {
+    return
 }
 
 $env:PLUGIN_ROOT = $pluginRoot

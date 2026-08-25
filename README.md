@@ -69,7 +69,13 @@ codex plugin marketplace add .
 codex plugin add pixel-doraemon-companion@pixel-doraemon
 ```
 
-然后新建一个 Codex 任务，让新版 hooks 生效。也可以双击 `Start-Doraemon-Companion.cmd` 手动启动；重复启动会复用现有实例。
+然后新建一个 Codex 任务，让新版 hooks 生效。推荐再安装无黑框的 Windows GUI 启动器：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Install-Doraemon-Launcher.ps1
+```
+
+它会生成带哆啦 A 梦图标的 `Pixel Doraemon Companion.exe`，并在桌面和开始菜单创建“启动哆啦 Companion”快捷方式；重复启动会复用现有实例。`Start-Doraemon-Companion.cmd` 仅作为兼容备用。
 
 Companion 默认每 60 秒从本机 Codex App Server 刷新一次额度，最低间隔为 15 秒；右键菜单可以立即刷新。它不读取或保存账号令牌。
 

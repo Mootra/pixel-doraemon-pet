@@ -14,7 +14,9 @@ overlay visible at the same time.
 - Right-click: use the Chinese Doraemon-styled menu to choose a prop, pause
   animation, refresh usage, open settings, restart, or exit.
 - Launch: Codex SessionStart starts one instance automatically; the installed
-  desktop shortcut provides an explicit manual start button.
+  desktop GUI launcher provides an explicit manual start button without opening
+  a console window. Its executable carries the Pixel Doraemon icon and locates
+  the newest installed `pixel-doraemon` marketplace build automatically.
 - Manage: right-click to refresh usage now, reload sprites, open the user config,
   restart the companion, or exit it.
 - Idle: look toward the cursor using the v2 direction rows.
@@ -43,3 +45,12 @@ right-click menu can refresh the atlas or request a fresh Codex usage snapshot.
 Codex requires plugin hooks to be reviewed and trusted before they run. The
 overlay uses Windows PowerShell/WPF plus a bundled Node helper that asks the
 local Codex App Server for the same rate-limit snapshot used by Codex clients.
+
+Build or refresh the Windows GUI launcher and its Desktop/Start Menu shortcuts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-launcher.ps1
+```
+
+`Start-Doraemon-Companion.cmd` remains a compatibility fallback; the generated
+`Pixel Doraemon Companion.exe` is the recommended manual launch path.

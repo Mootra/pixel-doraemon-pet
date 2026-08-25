@@ -1,6 +1,6 @@
 {
   "name": "pixel-doraemon-companion",
-  "version": "0.3.0+codex.20260824032828",
+  "version": "0.3.0+codex.20260825031745",
   "description": "Interactive Pixel Doraemon overlay driven by Codex lifecycle events.",
   "author": {
     "name": "Local developer"
