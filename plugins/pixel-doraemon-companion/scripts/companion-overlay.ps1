@@ -10,6 +10,121 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
+if ($null -eq ("PixelDoraemon.FocusNative" -as [type])) {
+    Add-Type @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace PixelDoraemon {
+    public static class FocusNative {
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WH_MOUSE_LL = 14;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_SYSKEYDOWN = 0x0104;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_MBUTTONDOWN = 0x0207;
+        private const int WM_XBUTTONDOWN = 0x020B;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc callback, IntPtr module, uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string moduleName);
+
+        private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
+        private static readonly object KeyboardLock = new object();
+        private static IntPtr keyboardHook = IntPtr.Zero;
+        private static IntPtr mouseHook = IntPtr.Zero;
+        private static LowLevelKeyboardProc keyboardCallback;
+        private static LowLevelKeyboardProc mouseCallback;
+        private static long keyboardPresses;
+        private static long lastActivityUtcTicks;
+
+        public static uint GetActivityIdleMilliseconds() {
+            lock (KeyboardLock) {
+                if (lastActivityUtcTicks <= 0) return UInt32.MaxValue;
+                long elapsed = (DateTime.UtcNow.Ticks - lastActivityUtcTicks) / TimeSpan.TicksPerMillisecond;
+                if (elapsed <= 0) return 0;
+                return elapsed >= UInt32.MaxValue ? UInt32.MaxValue : (uint)elapsed;
+            }
+        }
+
+        public static void StartInputCounter() {
+            lock (KeyboardLock) {
+                if (keyboardHook != IntPtr.Zero && mouseHook != IntPtr.Zero) return;
+                keyboardPresses = 0;
+                lastActivityUtcTicks = 0;
+                keyboardCallback = KeyboardHookCallback;
+                mouseCallback = MouseHookCallback;
+                using (Process current = Process.GetCurrentProcess()) {
+                    keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardCallback, GetModuleHandle(current.MainModule.ModuleName), 0);
+                    mouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseCallback, GetModuleHandle(current.MainModule.ModuleName), 0);
+                }
+                if (keyboardHook == IntPtr.Zero || mouseHook == IntPtr.Zero) {
+                    if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
+                    if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
+                    keyboardHook = IntPtr.Zero;
+                    mouseHook = IntPtr.Zero;
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                }
+            }
+        }
+
+        public static long ConsumeKeyboardPresses() {
+            lock (KeyboardLock) {
+                long count = keyboardPresses;
+                keyboardPresses = 0;
+                return count;
+            }
+        }
+
+        public static void StopInputCounter() {
+            lock (KeyboardLock) {
+                if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
+                if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
+                keyboardHook = IntPtr.Zero;
+                mouseHook = IntPtr.Zero;
+                keyboardCallback = null;
+                mouseCallback = null;
+            }
+        }
+
+        private static void NoteActivity() {
+            lastActivityUtcTicks = DateTime.UtcNow.Ticks;
+        }
+
+        private static IntPtr KeyboardHookCallback(int code, IntPtr wParam, IntPtr lParam) {
+            if (code >= 0 && ((int)wParam == WM_KEYDOWN || (int)wParam == WM_SYSKEYDOWN)) {
+                lock (KeyboardLock) {
+                    keyboardPresses++;
+                    NoteActivity();
+                }
+            }
+            return CallNextHookEx(keyboardHook, code, wParam, lParam);
+        }
+
+        private static IntPtr MouseHookCallback(int code, IntPtr wParam, IntPtr lParam) {
+            if (code >= 0 && ((int)wParam == WM_LBUTTONDOWN || (int)wParam == WM_RBUTTONDOWN || (int)wParam == WM_MBUTTONDOWN || (int)wParam == WM_XBUTTONDOWN)) {
+                lock (KeyboardLock) {
+                    NoteActivity();
+                }
+            }
+            return CallNextHookEx(mouseHook, code, wParam, lParam);
+        }
+    }
+}
+'@
+}
+
 $frameWidth = 192
 $frameHeight = 208
 $rowMap = @{
@@ -57,6 +172,11 @@ function Get-ConfigValue($UserSection, $DefaultSection, [string]$Name) {
         return $DefaultSection.$Name
     }
     return $null
+}
+
+function Get-ClampedConfigDouble($UserSection, $DefaultSection, [string]$Name, [double]$Minimum, [double]$Maximum) {
+    $value = [double](Get-ConfigValue $UserSection $DefaultSection $Name)
+    return [Math]::Min($Maximum, [Math]::Max($Minimum, $value))
 }
 
 function ConvertFrom-UnicodeCodePoints([int[]]$CodePoints) {
@@ -130,6 +250,20 @@ function Load-SpriteBitmap {
 
 $scale = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "scale")
 $usageEnabled = [bool](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "enabled")
+$usageDisplayIntervalMs = [Math]::Max(1000, [int](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "displayIntervalMs"))
+$usageDisplayDurationMs = [Math]::Max(1000, [int](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "displayDurationMs"))
+$bubblePageDurationMs = [Math]::Max(1000, [int](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "bubblePageDurationMs"))
+$usageBubbleOpacity = Get-ClampedConfigDouble $script:config.usage $script:defaultConfig.usage "bubbleBackgroundOpacity" 0.15 1.0
+$focusEnabled = [bool](Get-ConfigValue $script:config.focus $script:defaultConfig.focus "enabled")
+$focusIdleThresholdSeconds = [Math]::Max(15, [int](Get-ConfigValue $script:config.focus $script:defaultConfig.focus "idleThresholdSeconds"))
+$focusPomodoroSeconds = [Math]::Max(300, [int](Get-ConfigValue $script:config.focus $script:defaultConfig.focus "pomodoroMinutes") * 60)
+$focusStatePath = Join-Path $DataRoot "focus-state.json"
+$persistentDataRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "PixelDoraemonCompanion"
+$progressStatePath = Join-Path $persistentDataRoot "progress-state.json"
+$celebrationDurationMs = [Math]::Max(3000, [int](Get-ConfigValue $script:config.progress $script:defaultConfig.progress "celebrationDurationMs"))
+$maximumProgressHistory = [Math]::Max(10, [int](Get-ConfigValue $script:config.progress $script:defaultConfig.progress "maximumHistory"))
+$focusMilestones = @(Get-ConfigValue $script:config.progress $script:defaultConfig.progress "focusMilestones")
+$keyboardMilestones = @(Get-ConfigValue $script:config.progress $script:defaultConfig.progress "keyboardMilestones")
 Load-SpriteBitmap
 
 if ($ValidateOnly) {
@@ -145,6 +279,10 @@ if ($ValidateOnly) {
         columns = 8
         usageEnabled = $usageEnabled
         usageMonitorPath = (Join-Path $PluginRoot "scripts\usage-monitor.ps1")
+        focusEnabled = $focusEnabled
+        focusActivation = "keyboard-or-mouse-click"
+        focusStatePath = $focusStatePath
+        progressStatePath = $progressStatePath
     } | ConvertTo-Json -Depth 4
     return
 }
@@ -195,6 +333,8 @@ $doraBlueBrush = $brushConverter.ConvertFromString("#FF0051FC")
 $doraRedBrush = $brushConverter.ConvertFromString("#FFD90603")
 $doraYellowBrush = $brushConverter.ConvertFromString("#FFFBC400")
 $usageMutedBrush = $brushConverter.ConvertFromString("#FF64748B")
+$usageBubbleFillBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb([byte][Math]::Round(255 * $usageBubbleOpacity), 255, 255, 255))
+$usageBubbleFillBrush.Freeze()
 
 $usageCanvas = New-Object System.Windows.Controls.Canvas
 $usageCanvas.Width = $window.Width
@@ -208,7 +348,7 @@ $usageCanvas.Visibility = if ($usageEnabled) {
 $tailLarge = New-Object System.Windows.Shapes.Ellipse
 $tailLarge.Width = 25
 $tailLarge.Height = 17
-$tailLarge.Fill = [System.Windows.Media.Brushes]::White
+$tailLarge.Fill = $usageBubbleFillBrush
 $tailLarge.Stroke = $doraOutlineBrush
 $tailLarge.StrokeThickness = 3
 [System.Windows.Controls.Canvas]::SetLeft($tailLarge, $window.Width - ($spriteDisplayWidth * 0.58))
@@ -218,7 +358,7 @@ $tailLarge.StrokeThickness = 3
 $tailSmall = New-Object System.Windows.Shapes.Ellipse
 $tailSmall.Width = 13
 $tailSmall.Height = 9
-$tailSmall.Fill = [System.Windows.Media.Brushes]::White
+$tailSmall.Fill = $usageBubbleFillBrush
 $tailSmall.Stroke = $doraOutlineBrush
 $tailSmall.StrokeThickness = 2.5
 [System.Windows.Controls.Canvas]::SetLeft($tailSmall, $window.Width - ($spriteDisplayWidth * 0.48))
@@ -230,7 +370,7 @@ $usageBubble.Width = $usageBubbleWidth
 $usageBubble.Height = $usageBubbleHeight
 $usageBubble.CornerRadius = New-Object System.Windows.CornerRadius([Math]::Round($usageBubbleHeight / 2))
 $usageBubble.Padding = New-Object System.Windows.Thickness(14, 4, 14, 4)
-$usageBubble.Background = [System.Windows.Media.Brushes]::White
+$usageBubble.Background = $usageBubbleFillBrush
 $usageBubble.BorderBrush = $doraOutlineBrush
 $usageBubble.BorderThickness = New-Object System.Windows.Thickness(4)
 $usageBubble.SnapsToDevicePixels = $true
@@ -271,6 +411,16 @@ $usageTitleText.FontSize = 11.5
 $usageTitleText.FontWeight = [System.Windows.FontWeights]::Bold
 $usageTitleText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
 [void]$usageHeader.Children.Add($usageTitleText)
+
+$bubblePageIndicatorText = New-Object System.Windows.Controls.TextBlock
+$bubblePageIndicatorText.Text = "1 / 3"
+$bubblePageIndicatorText.Foreground = $usageMutedBrush
+$bubblePageIndicatorText.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Segoe UI"
+$bubblePageIndicatorText.FontSize = 9.5
+$bubblePageIndicatorText.FontWeight = [System.Windows.FontWeights]::SemiBold
+$bubblePageIndicatorText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+$bubblePageIndicatorText.Margin = New-Object System.Windows.Thickness(7, 0, 0, 0)
+[void]$usageHeader.Children.Add($bubblePageIndicatorText)
 [System.Windows.Controls.Grid]::SetRow($usageHeader, 0)
 [void]$usageContent.Children.Add($usageHeader)
 
@@ -330,6 +480,469 @@ $script:lookActive = $false
 $script:lastLookStepAt = [DateTime]::MinValue
 $script:lastUsageStamp = $null
 $script:lastUsageMonitorCheck = [DateTime]::MinValue
+$script:usageBubbleVisible = $usageEnabled
+$script:usageBubbleUntil = if ($usageEnabled) {
+    [DateTime]::UtcNow.AddMilliseconds($usageDisplayDurationMs)
+} else {
+    [DateTime]::MinValue
+}
+$script:nextUsageBubbleAt = if ($usageEnabled) {
+    [DateTime]::UtcNow.AddMilliseconds($usageDisplayIntervalMs)
+} else {
+    [DateTime]::MaxValue
+}
+$script:focusDate = [DateTime]::Now.ToString("yyyy-MM-dd")
+$script:focusActiveSeconds = 0
+$script:focusPomodoroElapsedSeconds = 0
+$script:focusCompletedPomodoros = 0
+$script:keyboardPresses = 0
+$script:keyboardCounterAvailable = $focusEnabled
+$script:focusIsActive = $false
+$script:focusIdleSeconds = 0
+$script:lastFocusSampleAt = [DateTime]::UtcNow
+$script:lastFocusPersistedAt = [DateTime]::MinValue
+$script:lastProgressPersistedAt = [DateTime]::MinValue
+$script:totalFocusSeconds = 0
+$script:totalKeyboardPresses = 0
+$script:totalCompletedFocusRounds = 0
+$script:unlockedMilestones = [ordered]@{}
+$script:progressHistory = @()
+$script:activeCelebration = $null
+$script:celebrationQueue = @()
+$script:celebrationUntil = [DateTime]::MinValue
+$script:usageMinimumRemaining = $null
+$script:usageDetailLabel = ConvertFrom-UnicodeCodePoints @(0x6B63, 0x5728, 0x8BFB, 0x53D6)
+$script:usageTooltip = ""
+$script:bubblePage = 0
+$script:lastBubblePageChangedAt = [DateTime]::UtcNow
+
+function Set-UsageBubbleVisible([bool]$Visible) {
+    if (-not $usageEnabled -or $script:usageBubbleVisible -eq $Visible) { return }
+
+    $script:usageBubbleVisible = $Visible
+    $usageCanvas.Visibility = if ($Visible) {
+        [System.Windows.Visibility]::Visible
+    } else {
+        [System.Windows.Visibility]::Collapsed
+    }
+    $usageRow.Height = New-Object System.Windows.GridLength($(if ($Visible) { $usagePanelHeight } else { 0 }))
+    $window.Height = $spriteDisplayHeight + $(if ($Visible) { $usagePanelHeight } else { 0 })
+    $window.Top = $workArea.Bottom - $window.Height - 40
+}
+
+function Update-UsageBubbleSchedule {
+    if (-not $usageEnabled) { return }
+
+    $now = [DateTime]::UtcNow
+    if ($script:usageBubbleVisible -and $now -ge $script:usageBubbleUntil) {
+        Set-UsageBubbleVisible $false
+        $script:nextUsageBubbleAt = $now.AddMilliseconds($usageDisplayIntervalMs)
+    } elseif (-not $script:usageBubbleVisible -and $now -ge $script:nextUsageBubbleAt) {
+        Set-UsageBubbleVisible $true
+        $script:usageBubbleUntil = $now.AddMilliseconds($usageDisplayDurationMs)
+        Set-BubblePage 0
+    }
+}
+
+function Show-UsageBubbleFromInteraction {
+    if (-not $usageEnabled) { return }
+
+    $wasVisible = $script:usageBubbleVisible
+    Update-UsageDisplay
+    $script:usageBubbleUntil = [DateTime]::UtcNow.AddMilliseconds($usageDisplayDurationMs)
+    Set-UsageBubbleVisible $true
+    if (-not $wasVisible) { Set-BubblePage 0 }
+}
+
+function Format-FocusDuration([int]$Seconds) {
+    return ("{0:00}:{1:00}" -f [Math]::Floor($Seconds / 60), ($Seconds % 60))
+}
+
+function Get-AppStatLabel($Stats) {
+    $items = @($Stats.GetEnumerator() | Sort-Object Key | ForEach-Object { "{0} {1}" -f $_.Key, $_.Value })
+    if ($items.Count -eq 0) { return "--" }
+    return ($items -join "  ")
+}
+
+function Get-AppDurationLabel($Stats) {
+    $items = @($Stats.GetEnumerator() | Sort-Object Key | ForEach-Object { "{0} {1}" -f $_.Key, (Format-FocusDuration ([int]$_.Value)) })
+    if ($items.Count -eq 0) { return "--" }
+    return ($items -join "  ")
+}
+
+function Get-ProgressHistoryLabel {
+    $items = @($script:progressHistory | Select-Object -First 5 | ForEach-Object {
+        $occurredAt = [DateTime]::MinValue
+        [void][DateTime]::TryParse([string]$_.occurredAtUtc, [ref]$occurredAt)
+        "{0}  {1:MM-dd HH:mm}" -f $_.title, $occurredAt.ToLocalTime()
+    })
+    if ($items.Count -eq 0) { return "--" }
+    return ($items -join "`n")
+}
+
+function Write-ProgressState {
+    $stateDirectory = Split-Path -Parent $progressStatePath
+    New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
+    $state = [ordered]@{
+        schemaVersion = 1
+        totalFocusSeconds = $script:totalFocusSeconds
+        totalKeyboardPresses = $script:totalKeyboardPresses
+        completedFocusRounds = $script:totalCompletedFocusRounds
+        unlockedMilestones = $script:unlockedMilestones
+        history = @($script:progressHistory)
+        updatedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+    $temporaryPath = "{0}.{1}.tmp" -f $progressStatePath, $PID
+    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+    Move-Item -LiteralPath $temporaryPath -Destination $progressStatePath -Force
+    $script:lastProgressPersistedAt = [DateTime]::UtcNow
+}
+
+function Initialize-ProgressState {
+    if (Test-Path -LiteralPath $progressStatePath) {
+        try {
+            $stored = Get-Content -Raw -Encoding UTF8 -LiteralPath $progressStatePath | ConvertFrom-Json
+            $script:totalFocusSeconds = [Math]::Max(0, [int]$stored.totalFocusSeconds)
+            $script:totalKeyboardPresses = [Math]::Max(0, [long]$stored.totalKeyboardPresses)
+            $script:totalCompletedFocusRounds = [Math]::Max(0, [int]$stored.completedFocusRounds)
+            if ($null -ne $stored.unlockedMilestones) {
+                foreach ($property in $stored.unlockedMilestones.PSObject.Properties) {
+                    $script:unlockedMilestones[$property.Name] = [bool]$property.Value
+                }
+            }
+            if ($null -ne $stored.history) {
+                $script:progressHistory = @($stored.history | Select-Object -First $maximumProgressHistory)
+            }
+        } catch {
+            # Preserve a usable companion when an interrupted write left invalid progress data.
+        }
+    } else {
+        # Carry today's existing counters into the first durable lifetime record.
+        $script:totalFocusSeconds = $script:focusActiveSeconds
+        $script:totalKeyboardPresses = $script:keyboardPresses
+        $script:totalCompletedFocusRounds = $script:focusCompletedPomodoros
+        Write-ProgressState
+    }
+}
+
+function Show-Celebration([string]$Kind, [string]$Title, [string]$Value, [string]$Message) {
+    $celebration = [pscustomobject]@{
+        kind = $Kind
+        title = $Title
+        value = $Value
+        message = $Message
+    }
+    if ($null -ne $script:activeCelebration -and [DateTime]::UtcNow -lt $script:celebrationUntil) {
+        $script:celebrationQueue = @($script:celebrationQueue) + @($celebration)
+        return
+    }
+    $script:activeCelebration = $celebration
+    $script:celebrationUntil = [DateTime]::UtcNow.AddMilliseconds($celebrationDurationMs)
+    $script:usageBubbleUntil = $script:celebrationUntil
+    Set-UsageBubbleVisible $true
+    Update-BubblePage
+}
+
+function Add-ProgressEvent([string]$Id, [string]$Kind, [string]$Title, [string]$Value, [string]$Message, [bool]$AlwaysShow = $false) {
+    if (-not $AlwaysShow -and $script:unlockedMilestones.Contains($Id)) { return }
+    if (-not $AlwaysShow) { $script:unlockedMilestones[$Id] = $true }
+    $event = [pscustomobject]@{
+        id = $Id
+        kind = $Kind
+        title = $Title
+        value = $Value
+        message = $Message
+        occurredAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+    $script:progressHistory = @($event) + @($script:progressHistory | Select-Object -First ($maximumProgressHistory - 1))
+    Write-ProgressState
+    Show-Celebration $Kind $Title $Value $Message
+}
+
+function Check-ProgressMilestones {
+    foreach ($milestone in $focusMilestones) {
+        $threshold = [int]$milestone.thresholdSeconds
+        if ($threshold -gt 0 -and $script:totalFocusSeconds -ge $threshold) {
+            Add-ProgressEvent ("focus-{0}" -f $threshold) "focus-milestone" ([string]$milestone.title) (Format-FocusDuration $script:totalFocusSeconds) ([string]$milestone.message)
+        }
+    }
+    foreach ($milestone in $keyboardMilestones) {
+        $threshold = [long]$milestone.thresholdCount
+        if ($threshold -eq 10000 -and $script:totalKeyboardPresses -ge $threshold) {
+            # The 10k key milestone repeats at every later multiple of 10k.
+            $latestMilestone = [long]([Math]::Floor($script:totalKeyboardPresses / $threshold) * $threshold)
+            $pendingMilestones = @()
+            while ($latestMilestone -ge $threshold -and -not $script:unlockedMilestones.Contains("keyboard-$latestMilestone")) {
+                $pendingMilestones = @($latestMilestone) + @($pendingMilestones)
+                $latestMilestone -= $threshold
+            }
+            foreach ($milestoneValue in $pendingMilestones) {
+                Add-ProgressEvent ("keyboard-{0}" -f $milestoneValue) "keyboard-repeat" ([string]$milestone.title) ("{0:N0}" -f $milestoneValue) ([string]$milestone.message)
+            }
+        } elseif ($threshold -gt 0 -and $script:totalKeyboardPresses -ge $threshold) {
+            Add-ProgressEvent ("keyboard-{0}" -f $threshold) "keyboard-milestone" ([string]$milestone.title) ("{0:N0}" -f $script:totalKeyboardPresses) ([string]$milestone.message)
+        }
+    }
+}
+
+function Show-FocusDashboard {
+    $dashboard = New-Object System.Windows.Window
+    $dashboard.Title = (ConvertFrom-UnicodeCodePoints @(0x54C6, 0x5566, 0x0041, 0x68A6)) + (ConvertFrom-UnicodeCodePoints @(0x4E13, 0x6CE8, 0x540E, 0x53F0))
+    $dashboard.Width = 430
+    $dashboard.Height = 500
+    $dashboard.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+    $dashboard.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $dashboard.Background = $brushConverter.ConvertFromString("#FFF8FBFF")
+
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $panel.Margin = New-Object System.Windows.Thickness(24)
+    $title = New-Object System.Windows.Controls.TextBlock
+    $title.Text = (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5, 0x4E13, 0x6CE8, 0x6570, 0x636E))
+    $title.Foreground = $doraOutlineBrush
+    $title.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
+    $title.FontSize = 22
+    $title.FontWeight = [System.Windows.FontWeights]::Bold
+    $title.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+    [void]$panel.Children.Add($title)
+
+    foreach ($line in @(
+        ((ConvertFrom-UnicodeCodePoints @(0x6709, 0x6548, 0x4E13, 0x6CE8)) + ": " + (Format-FocusDuration $script:focusActiveSeconds)),
+        ((ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x8F6E)) + ": " + (Format-FocusDuration $script:focusPomodoroElapsedSeconds) + " / " + (Format-FocusDuration $focusPomodoroSeconds)),
+        ((ConvertFrom-UnicodeCodePoints @(0x5B8C, 0x6210, 0x8F6E, 0x6570)) + ": " + $script:focusCompletedPomodoros),
+        ((ConvertFrom-UnicodeCodePoints @(0x8BA1, 0x65F6, 0x89E6, 0x53D1)) + ": " + (ConvertFrom-UnicodeCodePoints @(0x952E, 0x76D8, 0x6309, 0x4E0B, 0x6216, 0x9F20, 0x6807, 0x70B9, 0x51FB))),
+        ((ConvertFrom-UnicodeCodePoints @(0x952E, 0x76D8, 0x6572, 0x51FB)) + ": " + ("{0:N0}" -f $script:keyboardPresses)),
+        ((ConvertFrom-UnicodeCodePoints @(0x7EDF, 0x8BA1, 0x8303, 0x56F4)) + ": " + (ConvertFrom-UnicodeCodePoints @(0x6240, 0x6709, 0x5E94, 0x7528, 0xFF08, 0x4EC5, 0x4FDD, 0x5B58, 0x6B21, 0x6570, 0xFF09))),
+        ((ConvertFrom-UnicodeCodePoints @(0x7D2F, 0x8BA1, 0x4E13, 0x6CE8)) + ": " + (Format-FocusDuration $script:totalFocusSeconds) + "  /  " + (ConvertFrom-UnicodeCodePoints @(0x7D2F, 0x8BA1, 0x8F6E, 0x6B21)) + ": " + $script:totalCompletedFocusRounds),
+        ((ConvertFrom-UnicodeCodePoints @(0x7D2F, 0x8BA1, 0x6572, 0x51FB)) + ": " + ("{0:N0}" -f $script:totalKeyboardPresses)),
+        ((ConvertFrom-UnicodeCodePoints @(0x8BA1, 0x65F6, 0x89C4, 0x5219, 0xFF1A, 0x952E, 0x76D8, 0x6309, 0x4E0B, 0x6216, 0x9F20, 0x6807, 0x70B9, 0x51FB, 0x540E, 0x8BA1, 0x65F6, 0xFF0C, 0x8D85, 0x8FC7)) + " {0}s " + (ConvertFrom-UnicodeCodePoints @(0x672A, 0x64CD, 0x4F5C, 0x5373, 0x6682, 0x505C)) -f $focusIdleThresholdSeconds)
+    )) {
+        $text = New-Object System.Windows.Controls.TextBlock
+        $text.Text = $line
+        $text.Foreground = $doraOutlineBrush
+        $text.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
+        $text.FontSize = 13
+        $text.Margin = New-Object System.Windows.Thickness(0, 3, 0, 3)
+        $text.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        [void]$panel.Children.Add($text)
+    }
+
+    $historyTitle = New-Object System.Windows.Controls.TextBlock
+    $historyTitle.Text = ConvertFrom-UnicodeCodePoints @(0x6700, 0x8FD1, 0x5386, 0x7A0B)
+    $historyTitle.Foreground = $doraOutlineBrush
+    $historyTitle.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
+    $historyTitle.FontWeight = [System.Windows.FontWeights]::Bold
+    $historyTitle.Margin = New-Object System.Windows.Thickness(0, 10, 0, 2)
+    [void]$panel.Children.Add($historyTitle)
+    $history = New-Object System.Windows.Controls.TextBlock
+    $history.Text = Get-ProgressHistoryLabel
+    $history.Foreground = $usageMutedBrush
+    $history.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
+    $history.FontSize = 11
+    $history.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    [void]$panel.Children.Add($history)
+
+    $privacy = New-Object System.Windows.Controls.TextBlock
+    $privacy.Text = (ConvertFrom-UnicodeCodePoints @(0x53EA, 0x8BB0, 0x5F55, 0x8FDB, 0x7A0B, 0x540D, 0x79F0, 0x4E0E, 0x6B21, 0x6570, 0xFF0C, 0x4E0D, 0x8BFB, 0x53D6, 0x8F93, 0x5165, 0x5185, 0x5BB9))
+    $privacy.Foreground = $usageMutedBrush
+    $privacy.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
+    $privacy.FontSize = 11
+    $privacy.Margin = New-Object System.Windows.Thickness(0, 14, 0, 0)
+    $privacy.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    [void]$panel.Children.Add($privacy)
+
+    $dashboard.Content = $panel
+    [void]$dashboard.ShowDialog()
+}
+
+function Update-BubblePage {
+    if (-not $usageEnabled) { return }
+
+    if ($null -ne $script:activeCelebration) {
+        if ([DateTime]::UtcNow -lt $script:celebrationUntil) {
+            $bubblePageIndicatorText.Text = "*"
+            $usageHeaderDot.Fill = $doraYellowBrush
+            $usageTitleText.Text = (ConvertFrom-UnicodeCodePoints @(0x5E86, 0x795D)) + " * " + $script:activeCelebration.title
+            $usageValueText.Text = $script:activeCelebration.value
+            $usageValueText.Foreground = $doraRedBrush
+            $usageDetailText.Text = $script:activeCelebration.message
+            return
+        }
+        if ($script:celebrationQueue.Count -gt 0) {
+            $script:activeCelebration = $script:celebrationQueue[0]
+            $script:celebrationQueue = @($script:celebrationQueue | Select-Object -Skip 1)
+            $script:celebrationUntil = [DateTime]::UtcNow.AddMilliseconds($celebrationDurationMs)
+            $script:usageBubbleUntil = $script:celebrationUntil
+            Update-BubblePage
+            return
+        }
+        $script:activeCelebration = $null
+    }
+
+    $bubblePageIndicatorText.Text = "{0} / 3" -f ($script:bubblePage + 1)
+    switch ($script:bubblePage) {
+        0 {
+            $usageHeaderDot.Fill = $doraRedBrush
+            $usageTitleText.Text = "CODEX " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6))
+            if ($null -eq $script:usageMinimumRemaining) {
+                $usageValueText.Text = "--"
+                $usageValueText.Foreground = $usageMutedBrush
+            } else {
+                $usageValueText.Text = "{0}%" -f $script:usageMinimumRemaining
+                $usageValueText.Foreground = if ($script:usageMinimumRemaining -le 20) { $doraRedBrush } elseif ($script:usageMinimumRemaining -le 50) { $brushConverter.ConvertFromString("#FFC88600") } else { $doraBlueBrush }
+            }
+            $usageDetailText.Text = $script:usageDetailLabel
+        }
+        1 {
+            $usageHeaderDot.Fill = if ($script:focusIsActive) { $doraBlueBrush } else { $usageMutedBrush }
+            $usageTitleText.Text = ConvertFrom-UnicodeCodePoints @(0x4E13, 0x6CE8, 0x65F6, 0x95F4)
+            $usageValueText.Text = Format-FocusDuration $script:focusPomodoroElapsedSeconds
+            $usageValueText.Foreground = if ($script:focusIsActive) { $doraBlueBrush } else { $usageMutedBrush }
+            $stateLabel = if ($script:focusIsActive) { ConvertFrom-UnicodeCodePoints @(0x6B63, 0x5728, 0x4E13, 0x6CE8) } else { ConvertFrom-UnicodeCodePoints @(0x6682, 0x505C, 0x8BA1, 0x65F6) }
+            $usageDetailText.Text = "$stateLabel  " + (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5)) + " " + (Format-FocusDuration $script:focusActiveSeconds) + "  /  " + (ConvertFrom-UnicodeCodePoints @(0x603B, 0x8BA1)) + " " + (Format-FocusDuration $script:totalFocusSeconds)
+        }
+        default {
+            $usageHeaderDot.Fill = $doraYellowBrush
+            $usageTitleText.Text = ConvertFrom-UnicodeCodePoints @(0x952E, 0x76D8, 0x6572, 0x51FB)
+            $usageValueText.Text = "{0:N0}" -f $script:keyboardPresses
+            $usageValueText.Foreground = $doraOutlineBrush
+            $usageDetailText.Text = (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5)) + " " + ("{0:N0}" -f $script:keyboardPresses) + "  /  " + (ConvertFrom-UnicodeCodePoints @(0x603B, 0x8BA1)) + " " + ("{0:N0}" -f $script:totalKeyboardPresses)
+        }
+    }
+}
+
+function Set-BubblePage([int]$Page) {
+    $script:bubblePage = (($Page % 3) + 3) % 3
+    $script:lastBubblePageChangedAt = [DateTime]::UtcNow
+    Update-BubblePage
+}
+
+function Show-NextBubblePage {
+    Set-BubblePage ($script:bubblePage + 1)
+}
+
+function Update-BubblePageRotation {
+    if (-not $usageEnabled -or -not $script:usageBubbleVisible) { return }
+    if ($null -ne $script:activeCelebration -and [DateTime]::UtcNow -lt $script:celebrationUntil) { return }
+    if (([DateTime]::UtcNow - $script:lastBubblePageChangedAt).TotalMilliseconds -ge $bubblePageDurationMs) {
+        Show-NextBubblePage
+    }
+}
+
+function Update-FocusDisplay {
+    if (-not $focusEnabled) { return }
+
+    $focusStatus = if ($script:focusIsActive) { ConvertFrom-UnicodeCodePoints @(0x8BA1, 0x65F6, 0x4E2D) } else { ConvertFrom-UnicodeCodePoints @(0x6682, 0x505C) }
+    $focusMarker = ConvertFrom-UnicodeCodePoints @(0x4E13, 0x6CE8, 0x8BA1, 0x65F6)
+    $focusLine = "{0}: {1}; {2}: {3}; {4}: {5}; {6}: {7}s; {8}: {9}" -f `
+        $focusMarker, $focusStatus, `
+        (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5)), (Format-FocusDuration $script:focusActiveSeconds), `
+        (ConvertFrom-UnicodeCodePoints @(0x5B8C, 0x6210, 0x8F6E, 0x6570)), $script:focusCompletedPomodoros, `
+        (ConvertFrom-UnicodeCodePoints @(0x8DDD, 0x4E0A, 0x6B21, 0x64CD, 0x4F5C)), $script:focusIdleSeconds, `
+        (ConvertFrom-UnicodeCodePoints @(0x952E, 0x76D8, 0x6572, 0x51FB)), $script:keyboardPresses
+    $focusLine += "; {0}: {1}; {2}: {3}" -f `
+        (ConvertFrom-UnicodeCodePoints @(0x7D2F, 0x8BA1, 0x4E13, 0x6CE8)), (Format-FocusDuration $script:totalFocusSeconds), `
+        (ConvertFrom-UnicodeCodePoints @(0x7D2F, 0x8BA1, 0x6572, 0x51FB)), $script:totalKeyboardPresses
+    $markerIndex = ([string]$usageBubble.ToolTip).IndexOf("`n$focusMarker")
+    $baseTooltip = if ($markerIndex -ge 0) { ([string]$usageBubble.ToolTip).Substring(0, $markerIndex) } else { [string]$usageBubble.ToolTip }
+    $usageBubble.ToolTip = if ([string]::IsNullOrWhiteSpace($baseTooltip)) { $focusLine } else { "$baseTooltip`n$focusLine" }
+    Update-BubblePage
+}
+
+function Write-FocusState {
+    if (-not $focusEnabled) { return }
+
+    $state = [ordered]@{
+        schemaVersion = 1
+        date = $script:focusDate
+        activeSeconds = $script:focusActiveSeconds
+        keyboardPresses = $script:keyboardPresses
+        keyboardCounterAvailable = $script:keyboardCounterAvailable
+        pomodoroElapsedSeconds = $script:focusPomodoroElapsedSeconds
+        completedPomodoros = $script:focusCompletedPomodoros
+        isActive = $script:focusIsActive
+        idleSeconds = $script:focusIdleSeconds
+        updatedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+    $temporaryPath = "{0}.{1}.tmp" -f $focusStatePath, $PID
+    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+    Move-Item -LiteralPath $temporaryPath -Destination $focusStatePath -Force
+    $script:lastFocusPersistedAt = [DateTime]::UtcNow
+}
+
+function Initialize-FocusState {
+    if (-not $focusEnabled -or -not (Test-Path -LiteralPath $focusStatePath)) {
+        Update-FocusDisplay
+        return
+    }
+    try {
+        $stored = Get-Content -Raw -Encoding UTF8 -LiteralPath $focusStatePath | ConvertFrom-Json
+        if ([string]$stored.date -eq $script:focusDate) {
+            $script:focusActiveSeconds = [int]$stored.activeSeconds
+            $script:focusPomodoroElapsedSeconds = [int]$stored.pomodoroElapsedSeconds
+            $script:focusCompletedPomodoros = [int]$stored.completedPomodoros
+            $script:keyboardPresses = [int]$stored.keyboardPresses
+        }
+    } catch {
+        # Start a fresh daily tally if an interrupted write left an invalid state file.
+    }
+    Update-FocusDisplay
+}
+
+function Update-FocusTracking {
+    if (-not $focusEnabled) { return }
+
+    $now = [DateTime]::UtcNow
+    $elapsedSeconds = [Math]::Floor(($now - $script:lastFocusSampleAt).TotalSeconds)
+    if ($elapsedSeconds -lt 1) { return }
+    $script:lastFocusSampleAt = $now
+    $elapsedSeconds = [Math]::Min(2, [int]$elapsedSeconds)
+
+    $today = [DateTime]::Now.ToString("yyyy-MM-dd")
+    if ($today -ne $script:focusDate) {
+        $script:focusDate = $today
+        $script:focusActiveSeconds = 0
+        $script:focusPomodoroElapsedSeconds = 0
+        $script:focusCompletedPomodoros = 0
+        $script:keyboardPresses = 0
+    }
+
+    $script:focusIdleSeconds = [Math]::Floor([double][PixelDoraemon.FocusNative]::GetActivityIdleMilliseconds() / 1000)
+    $script:focusIsActive = $script:focusIdleSeconds -le $focusIdleThresholdSeconds
+
+    if ($script:keyboardCounterAvailable) {
+        $newKeyboardPresses = [int][PixelDoraemon.FocusNative]::ConsumeKeyboardPresses()
+        if ($newKeyboardPresses -gt 0) {
+            $script:keyboardPresses += $newKeyboardPresses
+            $script:totalKeyboardPresses += $newKeyboardPresses
+        }
+        Check-ProgressMilestones
+    }
+
+    if ($script:focusIsActive) {
+        $script:focusActiveSeconds += $elapsedSeconds
+        $script:focusPomodoroElapsedSeconds += $elapsedSeconds
+        $script:totalFocusSeconds += $elapsedSeconds
+        if ($script:focusPomodoroElapsedSeconds -ge $focusPomodoroSeconds) {
+            $newCompletedRounds = [int][Math]::Floor($script:focusPomodoroElapsedSeconds / $focusPomodoroSeconds)
+            $script:focusCompletedPomodoros += $newCompletedRounds
+            $script:totalCompletedFocusRounds += $newCompletedRounds
+            $script:focusPomodoroElapsedSeconds %= $focusPomodoroSeconds
+            $roundTitle = "30 " + (ConvertFrom-UnicodeCodePoints @(0x5206, 0x949F, 0x4E13, 0x6CE8, 0x5B8C, 0x6210))
+            $roundValue = (ConvertFrom-UnicodeCodePoints @(0x7B2C)) + " {0} " + (ConvertFrom-UnicodeCodePoints @(0x8F6E)) -f $script:totalCompletedFocusRounds
+            $roundMessage = ConvertFrom-UnicodeCodePoints @(0x8FD9, 0x4E00, 0x6BB5, 0x4E13, 0x6CE8, 0x5DF2, 0x7ECF, 0x6C89, 0x6DC0, 0x6210, 0x4F60, 0x7684, 0x8282, 0x594F)
+            Add-ProgressEvent ("focus-round-{0}" -f $script:totalCompletedFocusRounds) "focus-round" $roundTitle $roundValue $roundMessage $true
+        }
+        Check-ProgressMilestones
+    }
+
+    Update-FocusDisplay
+    if (($now - $script:lastFocusPersistedAt).TotalSeconds -ge 10) {
+        Write-FocusState
+    }
+    if (($now - $script:lastProgressPersistedAt).TotalSeconds -ge 10) {
+        Write-ProgressState
+    }
+}
 
 function Test-UsageMonitorRunning {
     if (-not (Test-Path -LiteralPath $usagePidPath)) { return $false }
@@ -361,31 +974,31 @@ function Start-UsageMonitor {
 }
 
 function Get-UsageDurationLabel($Minutes) {
-    if ($null -eq $Minutes) { return "window" }
+    if ($null -eq $Minutes) { return (ConvertFrom-UnicodeCodePoints @(0x672A, 0x77E5, 0x7A97, 0x53E3)) }
     $value = [long]$Minutes
-    if ($value -ge 1440 -and $value % 1440 -eq 0) { return ("{0}d" -f ($value / 1440)) }
-    if ($value -ge 60 -and $value % 60 -eq 0) { return ("{0}h" -f ($value / 60)) }
-    return ("{0}m" -f $value)
+    if ($value -ge 1440 -and $value % 1440 -eq 0) { return ("{0}" -f ($value / 1440)) + (ConvertFrom-UnicodeCodePoints @(0x5929)) }
+    if ($value -ge 60 -and $value % 60 -eq 0) { return ("{0}" -f ($value / 60)) + (ConvertFrom-UnicodeCodePoints @(0x5C0F, 0x65F6)) }
+    return ("{0}" -f $value) + (ConvertFrom-UnicodeCodePoints @(0x5206, 0x949F))
 }
 
 function Get-UsageResetLabel($EpochSeconds) {
     if ($null -eq $EpochSeconds) { return $null }
     try {
-        return [DateTimeOffset]::FromUnixTimeSeconds([long]$EpochSeconds).ToLocalTime().ToString("MMM d HH:mm")
+        return [DateTimeOffset]::FromUnixTimeSeconds([long]$EpochSeconds).ToLocalTime().ToString("MM'/'dd HH:mm")
     } catch {
         return $null
     }
 }
 
 function Set-UsageUnavailable([string]$Reason) {
-    $usageValueText.Text = "--"
-    $usageValueText.Foreground = $usageMutedBrush
-    $usageDetailText.Text = ConvertFrom-UnicodeCodePoints @(0x989D, 0x5EA6, 0x6682, 0x4E0D, 0x53EF, 0x7528)
+    $script:usageMinimumRemaining = $null
+    $script:usageDetailLabel = ConvertFrom-UnicodeCodePoints @(0x989D, 0x5EA6, 0x6682, 0x4E0D, 0x53EF, 0x7528)
     $usageBubble.ToolTip = if ([string]::IsNullOrWhiteSpace($Reason)) {
-        "Codex remaining usage is temporarily unavailable."
+        "Codex " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6, 0x6682, 0x4E0D, 0x53EF, 0x7528))
     } else {
-        "Codex remaining usage is temporarily unavailable.`n$Reason"
+        "Codex " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6, 0x6682, 0x4E0D, 0x53EF, 0x7528, 0x3002, 0x8BE6, 0x7EC6, 0x539F, 0x56E0, 0xFF1A)) + "`n$Reason"
     }
+    Update-BubblePage
 }
 
 function Update-UsageDisplay {
@@ -412,30 +1025,30 @@ function Update-UsageDisplay {
             [void]$remainingValues.Add($remaining)
             [void]$labelParts.Add(("{0} {1}%" -f $duration, $remaining))
 
-            $detail = "{0} window: {1}% remaining" -f $duration, $remaining
+            $detail = "{0}" + (ConvertFrom-UnicodeCodePoints @(0x7A97, 0x53E3, 0xFF1A, 0x5269, 0x4F59)) + " {1}%" -f $duration, $remaining
             if ($showResetTime) {
                 $reset = Get-UsageResetLabel $usageWindow.resetsAt
-                if ($reset) { $detail += ", resets $reset" }
+                if ($reset) { $detail += (ConvertFrom-UnicodeCodePoints @(0xFF0C, 0x91CD, 0x7F6E, 0x4E8E)) + " $reset" }
             }
             [void]$detailParts.Add($detail)
         }
 
         if ($labelParts.Count -eq 0 -and $null -ne $state.credits -and [bool]$state.credits.unlimited) {
-            [void]$labelParts.Add("unlimited")
-            [void]$detailParts.Add("Current Codex usage is unlimited")
+            [void]$labelParts.Add((ConvertFrom-UnicodeCodePoints @(0x4E0D, 0x9650, 0x91CF)))
+            [void]$detailParts.Add("Codex " + (ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x7528, 0x91CF, 0x4E0D, 0x9650, 0x5236)))
         }
         if ($labelParts.Count -eq 0) {
-            Set-UsageUnavailable "The current account returned no displayable usage window."
+            Set-UsageUnavailable (ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x8D26, 0x6237, 0x6CA1, 0x6709, 0x53EF, 0x663E, 0x793A, 0x7684, 0x7528, 0x91CF, 0x7A97, 0x53E3))
             return
         }
 
         $tooltip = New-Object System.Collections.Generic.List[string]
-        [void]$tooltip.Add("Codex remaining usage")
+        [void]$tooltip.Add("Codex " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6)))
         foreach ($detail in $detailParts) { [void]$tooltip.Add($detail) }
         if ($null -ne $state.credits -and [bool]$state.credits.hasCredits -and -not [bool]$state.credits.unlimited) {
-            [void]$tooltip.Add(("Available credits: {0}" -f $state.credits.balance))
+            [void]$tooltip.Add(((ConvertFrom-UnicodeCodePoints @(0x53EF, 0x7528, 0x70B9, 0x6570)) + ": {0}" -f $state.credits.balance))
         }
-        [void]$tooltip.Add(("Updated: {0}" -f ([DateTime]$state.timestampUtc).ToLocalTime().ToString("HH:mm:ss")))
+        [void]$tooltip.Add(((ConvertFrom-UnicodeCodePoints @(0x66F4, 0x65B0, 0x65F6, 0x95F4)) + ": {0}" -f ([DateTime]$state.timestampUtc).ToLocalTime().ToString("HH:mm:ss")))
         $usageBubble.ToolTip = $tooltip -join "`n"
 
         $minimumRemaining = if ($remainingValues.Count -gt 0) {
@@ -443,21 +1056,13 @@ function Update-UsageDisplay {
         } else {
             100
         }
-        if ($remainingValues.Count -gt 0) {
-            $usageValueText.Text = "{0}%" -f $minimumRemaining
-            $usageDetailText.Text = $labelParts -join ("  " + [char]0x00B7 + "  ")
+        $script:usageMinimumRemaining = if ($remainingValues.Count -gt 0) { [int]$minimumRemaining } else { 100 }
+        $script:usageDetailLabel = if ($remainingValues.Count -gt 0) {
+            $labelParts -join ("  " + [char]0x00B7 + "  ")
         } else {
-            $usageValueText.Text = [char]0x221E
-            $usageDetailText.Text = ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x8D26, 0x6237, 0x4E0D, 0x9650, 0x91CF)
+            ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x8D26, 0x6237, 0x4E0D, 0x9650, 0x91CF)
         }
-        $color = if ($minimumRemaining -le 20) {
-            "#FFD90603"
-        } elseif ($minimumRemaining -le 50) {
-            "#FFC88600"
-        } else {
-            "#FF0051FC"
-        }
-        $usageValueText.Foreground = $brushConverter.ConvertFromString($color)
+        Update-BubblePage
     } catch {
         Set-UsageUnavailable $_.Exception.Message
     }
@@ -599,6 +1204,9 @@ $window.Add_MouseLeftButtonDown({
     try { $window.DragMove() } catch {}
     if ([Math]::Abs($window.Left - $leftBefore) -lt 3 -and [Math]::Abs($window.Top - $topBefore) -lt 3) {
         Start-TemporaryAction "waving"
+        $wasBubbleVisible = $script:usageBubbleVisible
+        Show-UsageBubbleFromInteraction
+        if ($wasBubbleVisible) { Show-NextBubblePage }
     }
 })
 
@@ -694,7 +1302,7 @@ $menuHeaderDot.Fill = $doraRedBrush
 $menuHeaderDot.Margin = New-Object System.Windows.Thickness(0, 0, 7, 0)
 [void]$menuHeaderPanel.Children.Add($menuHeaderDot)
 $menuHeaderText = New-Object System.Windows.Controls.TextBlock
-$menuHeaderText.Text = (ConvertFrom-UnicodeCodePoints @(0x54C6, 0x5566, 0x0041, 0x68A6)) + " COMPANION"
+$menuHeaderText.Text = (ConvertFrom-UnicodeCodePoints @(0x54C6, 0x5566, 0x0041, 0x68A6)) + (ConvertFrom-UnicodeCodePoints @(0x4F19, 0x4F34))
 $menuHeaderText.Foreground = $doraOutlineBrush
 $menuHeaderText.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
 $menuHeaderText.FontSize = 12
@@ -764,9 +1372,17 @@ if ($usageEnabled) {
     [void]$menu.Items.Add($refreshUsageItem)
 }
 
+if ($focusEnabled) {
+    $focusDashboardItem = New-Object System.Windows.Controls.MenuItem
+    $focusDashboardItem.Style = $menuItemStyle
+    $focusDashboardItem.Header = (ConvertFrom-UnicodeCodePoints @(0x6253, 0x5F00)) + (ConvertFrom-UnicodeCodePoints @(0x4E13, 0x6CE8, 0x540E, 0x53F0))
+    $focusDashboardItem.Add_Click({ Show-FocusDashboard })
+    [void]$menu.Items.Add($focusDashboardItem)
+}
+
 $openConfigItem = New-Object System.Windows.Controls.MenuItem
 $openConfigItem.Style = $menuItemStyle
-$openConfigItem.Header = (ConvertFrom-UnicodeCodePoints @(0x6253, 0x5F00)) + " Companion " + (ConvertFrom-UnicodeCodePoints @(0x8BBE, 0x7F6E))
+$openConfigItem.Header = (ConvertFrom-UnicodeCodePoints @(0x6253, 0x5F00)) + (ConvertFrom-UnicodeCodePoints @(0x4F19, 0x4F34, 0x8BBE, 0x7F6E))
 $openConfigItem.Add_Click({
     Start-Process -FilePath "notepad.exe" -ArgumentList ('"{0}"' -f $configPath) | Out-Null
 })
@@ -774,7 +1390,7 @@ $openConfigItem.Add_Click({
 
 $restartItem = New-Object System.Windows.Controls.MenuItem
 $restartItem.Style = $menuItemStyle
-$restartItem.Header = (ConvertFrom-UnicodeCodePoints @(0x91CD, 0x65B0, 0x542F, 0x52A8)) + " Companion"
+$restartItem.Header = (ConvertFrom-UnicodeCodePoints @(0x91CD, 0x65B0, 0x542F, 0x52A8)) + (ConvertFrom-UnicodeCodePoints @(0x4F19, 0x4F34))
 $restartItem.Add_Click({
     $launcherPath = Join-Path $PluginRoot "scripts\start-companion.ps1"
     Start-Process -FilePath "powershell.exe" -ArgumentList @(
@@ -788,7 +1404,7 @@ $restartItem.Add_Click({
 
 $exitItem = New-Object System.Windows.Controls.MenuItem
 $exitItem.Style = $menuItemStyle
-$exitItem.Header = (ConvertFrom-UnicodeCodePoints @(0x9000, 0x51FA)) + " Companion"
+$exitItem.Header = (ConvertFrom-UnicodeCodePoints @(0x9000, 0x51FA)) + (ConvertFrom-UnicodeCodePoints @(0x4F19, 0x4F34))
 $exitItem.Add_Click({ $window.Close() })
 [void]$menu.Items.Add($exitItem)
 $image.ContextMenu = $menu
@@ -799,6 +1415,8 @@ $stateTimer.Interval = [TimeSpan]::FromMilliseconds(180)
 $stateTimer.Add_Tick({
     Test-And-ReloadSprite
     Update-UsageDisplay
+    Update-UsageBubbleSchedule
+    Update-BubblePageRotation
     $now = [DateTime]::UtcNow
     if ($usageEnabled -and ($now - $script:lastUsageMonitorCheck).TotalSeconds -ge 8) {
         $script:lastUsageMonitorCheck = $now
@@ -818,6 +1436,10 @@ $stateTimer.Add_Tick({
         # A concurrent hook may be replacing the state file; retry next tick.
     }
 })
+
+$focusTimer = New-Object System.Windows.Threading.DispatcherTimer
+$focusTimer.Interval = [TimeSpan]::FromSeconds(1)
+$focusTimer.Add_Tick({ Update-FocusTracking })
 
 $animationTimer = New-Object System.Windows.Threading.DispatcherTimer
 $animationTimer.Interval = [TimeSpan]::FromMilliseconds(50)
@@ -857,6 +1479,10 @@ $animationTimer.Add_Tick({
 $window.Add_Closed({
     $stateTimer.Stop()
     $animationTimer.Stop()
+    $focusTimer.Stop()
+    Write-FocusState
+    Write-ProgressState
+    if ($script:keyboardCounterAvailable) { [PixelDoraemon.FocusNative]::StopInputCounter() }
     Remove-Item -LiteralPath $pidPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $usageRefreshRequestPath -ErrorAction SilentlyContinue
     if ($script:ownsSingleInstanceMutex) {
@@ -903,7 +1529,17 @@ if (-not [string]::IsNullOrWhiteSpace($PreviewPath)) {
 $PID | Set-Content -LiteralPath $pidPath -Encoding ASCII
 Start-UsageMonitor
 Update-UsageDisplay
+Initialize-FocusState
+Initialize-ProgressState
+if ($focusEnabled) {
+    try {
+        [PixelDoraemon.FocusNative]::StartInputCounter()
+    } catch {
+        $script:keyboardCounterAvailable = $false
+    }
+}
 Set-Frame "idle" 0
 $stateTimer.Start()
 $animationTimer.Start()
+$focusTimer.Start()
 [void]$window.ShowDialog()

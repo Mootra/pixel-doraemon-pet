@@ -15,7 +15,7 @@ internal static class PixelDoraemonCompanionLauncher
             if (pluginRoot == null)
             {
                 throw new InvalidOperationException(
-                    "Pixel Doraemon Companion is not installed. Install the pixel-doraemon marketplace plugin first.");
+                    "\u54c6\u5566A\u68a6\u4f19\u4f34\u5c1a\u672a\u5b89\u88c5\u3002\u8bf7\u5148\u5b89\u88c5 pixel-doraemon \u63d2\u4ef6\u5e02\u573a\u4e2d\u7684\u5bf9\u5e94\u63d2\u4ef6\u3002");
             }
 
             string startScript = Path.Combine(pluginRoot, "scripts", "start-companion.ps1");
@@ -39,7 +39,7 @@ internal static class PixelDoraemonCompanionLauncher
             Application.EnableVisualStyles();
             MessageBox.Show(
                 error.Message,
-                "Pixel Doraemon Companion",
+                "\u54c6\u5566A\u68a6\u4f19\u4f34",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }

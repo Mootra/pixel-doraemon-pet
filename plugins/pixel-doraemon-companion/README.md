@@ -1,56 +1,35 @@
-# Pixel Doraemon Companion
+# 哆啦A梦伙伴
 
-This Windows-only personal Codex plugin maps lifecycle hooks to an independent
-transparent Pixel Doraemon overlay. It does not replace or control Codex's
-built-in pet renderer. Use it when you want hook-driven actions or the gadget
-menu; hide one of the two pets if you do not want both the native pet and the
-overlay visible at the same time.
+这是一个仅限 Windows 的个人 Codex 插件：它通过生命周期钩子驱动一个独立、透明的哆啦A梦悬浮宠物。它不会替换或控制 Codex 内置宠物；若不想同时看到两个宠物，请隐藏其中一个。
 
-## Interactions
+## 互动方式
 
-- Drag: move the companion.
-- Click: wave.
-- Double-click: use the bamboo copter.
-- Right-click: use the Chinese Doraemon-styled menu to choose a prop, pause
-  animation, refresh usage, open settings, restart, or exit.
-- Launch: Codex SessionStart starts one instance automatically; the installed
-  desktop GUI launcher provides an explicit manual start button without opening
-  a console window. Its executable carries the Pixel Doraemon icon and locates
-  the newest installed `pixel-doraemon` marketplace build automatically.
-- Manage: right-click to refresh usage now, reload sprites, open the user config,
-  restart the companion, or exit it.
-- Idle: look toward the cursor using the v2 direction rows.
-- Sprite updates: prefer the separately installed `pixel-doraemon-v3` PNG, poll for
-  changes, and fall back to the plugin's bundled atlas.
-- Motion: calculate cursor direction from Doraemon's head center in DPI-corrected
-  screen coordinates, use separate enter/exit distances plus angular hysteresis
-  to prevent edge jitter, and advance along the shortest one-frame path every
-  50 ms so moving cursors do not stall the gaze.
-- Usage bubble: show the lowest live remaining percentage as the main number,
-  list every active limit window below it, and keep reset times in the tooltip.
-  Data comes from the local Codex App Server and does not read or store account
-  tokens.
+- 拖动：移动伙伴位置。
+- 单击：挥手并打开气泡；气泡已显示时，再次单击切换到下一页。
+- 双击：使用竹蜻蜓。
+- 右键：打开哆啦A梦风格菜单，可使用道具、暂停动画、刷新额度、打开专注后台、设置、重启或退出。
+- 启动：Codex 会在会话开始时自动启动一个实例；安装后的桌面图形启动器也可以手动启动，不会显示控制台窗口。启动器带有哆啦A梦图标，并自动定位最新安装的 `pixel-doraemon` 市场版本。
+- 管理：右键可立即刷新额度、重新加载图集、打开用户配置、重启或退出。
+- 空闲：利用 v2 方向帧注视鼠标。
+- 素材更新：优先使用单独安装的 `pixel-doraemon-v3` PNG，定期检测变化；不可用时回退到插件自带图集。
+- 动作：以哆啦A梦头部中心计算经过 DPI 校正的鼠标方向，采用进入/退出距离与角度滞后避免抖动，并每 50ms 按最短路径推进一帧。
+- 气泡轮换：每 4 秒轮换显示 Codex 剩余额度、当前专注轮次和今日键盘敲击数。正常显示持续 12 秒；首次单击打开额度页，后续单击切换下一页。数据来自本地 Codex App Server，不读取或保存账户令牌。
+- 专注计时：仅当 Codex 或 VS Code 位于前台，且在空闲阈值内发生过键盘或鼠标输入时计时。气泡显示当前 30 分钟专注轮；`focus-state.json` 保存当天总时长、按应用时长和全局键盘敲击次数。键盘计数覆盖所有应用，但只保存数字，不读取输入文本、窗口标题或按键内容。
+- 成长历程：每完成一轮 30 分钟专注，显示 8 秒庆祝气泡。累计专注在 30 分钟、2 小时、5 小时、10 小时解锁节点；敲击在 100、1,000、5,000、10,000 次解锁节点，此后每多累计 10,000 次都会再次祝贺。若同时达成多个事件，庆祝气泡会排队展示而不会被覆盖。
+- 专注后台：右键宠物后打开，可查看当天有效专注、当前轮次、完成轮次、按应用统计、键盘统计、累计总量和最近历程。
 
-The first run copies `config/default-config.json` into the plugin's writable
-data directory as `config.json`. Edit that user copy to change animation speed,
-action hold time, event mappings, weighted prop probabilities, or the usage
-badge. Set `usage.enabled` to `false` to hide it; `usage.pollMs` controls the
-automatic refresh interval (60 seconds by default) and is clamped to at least
-15 seconds.
+首次启动时，插件会将 `config/default-config.json` 复制到可写数据目录中的 `config.json`。可修改该用户配置来调整动画速度、动作停留时间、事件映射、道具权重或额度气泡。设置 `usage.enabled` 为 `false` 可隐藏额度气泡；`usage.pollMs` 控制自动刷新间隔（默认 60 秒，最低 15 秒）。气泡启动时立即显示，之后按 `usage.displayIntervalMs`（默认 5 分钟）显示；`usage.displayDurationMs` 默认 12 秒，`usage.bubblePageDurationMs` 默认 4 秒。`usage.bubbleBackgroundOpacity` 控制白色气泡背景与尾巴的不透明度（范围 0 到 1，默认 0.82）。
 
-New defaults remain available to older user configs: missing asset, timing,
-cursor-follow, or usage settings are read from `default-config.json`. The
-right-click menu can refresh the atlas or request a fresh Codex usage snapshot.
+`focus` 部分控制本地专注计时器。键盘按下或鼠标点击会立即激活计时；`idleThresholdSeconds` 默认 90 秒，连续超过 90 秒没有这两种操作即暂停。鼠标移动、仅将窗口置于前台不会续时。`pomodoroMinutes` 默认 30。完成一轮会显示独立庆祝气泡，但不会打断宠物动画。跨天累计数据保存在 `%LOCALAPPDATA%\PixelDoraemonCompanion\progress-state.json`，包括总专注时长、总敲击次数、完成轮次与里程碑历史；插件缓存更新后仍会保留。该文件只保存汇总数字和事件标题，不包含具体按键内容。
 
-Codex requires plugin hooks to be reviewed and trusted before they run. The
-overlay uses Windows PowerShell/WPF plus a bundled Node helper that asks the
-local Codex App Server for the same rate-limit snapshot used by Codex clients.
+旧版用户配置中缺失的新设置会自动从 `default-config.json` 读取默认值。右键菜单可重新加载图集或请求新的 Codex 额度快照。
 
-Build or refresh the Windows GUI launcher and its Desktop/Start Menu shortcuts:
+Codex 要求先审核并信任插件钩子，之后才能运行。悬浮宠物使用 Windows PowerShell/WPF，以及一个随插件提供的 Node 辅助程序；辅助程序向本地 Codex App Server 请求与 Codex 客户端相同的额度快照。
+
+构建或更新 Windows 图形启动器，以及桌面和开始菜单快捷方式：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-launcher.ps1
 ```
 
-`Start-Doraemon-Companion.cmd` remains a compatibility fallback; the generated
-`Pixel Doraemon Companion.exe` is the recommended manual launch path.
+`Start-Doraemon-Companion.cmd` 仍保留为兼容性启动方式；推荐使用生成的图形启动器手动启动。

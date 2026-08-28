@@ -18,7 +18,32 @@
   "usage": {
     "enabled": true,
     "pollMs": 60000,
-    "showResetTime": true
+    "showResetTime": true,
+    "displayIntervalMs": 300000,
+    "displayDurationMs": 12000,
+    "bubblePageDurationMs": 4000,
+    "bubbleBackgroundOpacity": 0.82
+  },
+  "focus": {
+    "enabled": true,
+    "idleThresholdSeconds": 90,
+    "pomodoroMinutes": 30
+  },
+  "progress": {
+    "celebrationDurationMs": 8000,
+    "maximumHistory": 30,
+    "focusMilestones": [
+      { "thresholdSeconds": 1800, "title": "首次专注", "message": "30 分钟沉浸，继续保持！" },
+      { "thresholdSeconds": 7200, "title": "稳定节奏", "message": "累计专注 2 小时，节奏很稳。" },
+      { "thresholdSeconds": 18000, "title": "深度投入", "message": "累计专注 5 小时，真不错！" },
+      { "thresholdSeconds": 36000, "title": "专注达人", "message": "累计专注 10 小时，继续前进。" }
+    ],
+    "keyboardMilestones": [
+      { "thresholdCount": 100, "title": "第一百击", "message": "从第一百次敲击开始积累。" },
+      { "thresholdCount": 1000, "title": "千键起步", "message": "累计敲击 1,000 次。" },
+      { "thresholdCount": 5000, "title": "键入成流", "message": "累计敲击 5,000 次。" },
+      { "thresholdCount": 10000, "title": "万键里程碑", "message": "又完成一个万键篇章，继续前进！" }
+    ]
   },
   "frameDurationMs": {
     "idle": 520,

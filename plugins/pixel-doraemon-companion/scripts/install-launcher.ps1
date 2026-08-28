@@ -46,7 +46,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $exePath)) {
 }
 
 Copy-Item -LiteralPath $iconPath -Destination (Join-Path $InstallRoot "pixel-doraemon.ico") -Force
-$shortcutName = (-join @([char]0x542F, [char]0x52A8, [char]0x54C6, [char]0x5566)) + " Companion.lnk"
+$shortcutName = (-join @([char]0x542F, [char]0x52A8, [char]0x54C6, [char]0x5566, [char]0x0041, [char]0x68A6, [char]0x4F19, [char]0x4F34)) + ".lnk"
 $shell = New-Object -ComObject WScript.Shell
 
 function New-LauncherShortcut([string]$ShortcutPath) {
@@ -56,7 +56,7 @@ function New-LauncherShortcut([string]$ShortcutPath) {
     $shortcut.TargetPath = $exePath
     $shortcut.WorkingDirectory = $InstallRoot
     $shortcut.IconLocation = "$exePath,0"
-    $shortcut.Description = "Launch Pixel Doraemon Companion without a console window."
+    $shortcut.Description = (-join @([char]0x542F, [char]0x52A8, [char]0x54C6, [char]0x5566, [char]0x0041, [char]0x68A6, [char]0x4F19, [char]0x4F34, [char]0xFF0C, [char]0x4E0D, [char]0x663E, [char]0x793A, [char]0x63A7, [char]0x5236, [char]0x53F0, [char]0x7A97, [char]0x53E3, [char]0x3002))
     $shortcut.WindowStyle = 1
     $shortcut.Save()
 }
@@ -69,7 +69,7 @@ if (-not $NoDesktopShortcut) {
 
 $startMenuShortcut = $null
 if (-not $NoStartMenuShortcut) {
-    $startMenuDir = Join-Path ([Environment]::GetFolderPath("Programs")) "Pixel Doraemon Companion"
+    $startMenuDir = Join-Path ([Environment]::GetFolderPath("Programs")) ((-join @([char]0x54C6, [char]0x5566, [char]0x0041, [char]0x68A6, [char]0x4F19, [char]0x4F34)))
     $startMenuShortcut = Join-Path $startMenuDir $shortcutName
     New-LauncherShortcut $startMenuShortcut
 }
