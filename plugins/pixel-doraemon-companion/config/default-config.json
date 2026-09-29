@@ -11,26 +11,35 @@
   },
   "asset": {
     "preferInstalledCodexPet": true,
-    "petId": "pixel-doraemon-v3",
+    "petId": "pixel-doraemon",
     "bundledPath": "assets\\spritesheet.png",
+    "bundledPaths": {
+      "pixel-doraemon": "assets\\spritesheet-v2.png",
+      "pixel-doraemon-v3": "assets\\spritesheet-v3.png"
+    },
     "reloadPollMs": 1500
   },
   "usage": {
     "enabled": true,
     "pollMs": 60000,
-    "showResetTime": true,
+    "showResetTime": true
+  },
+  "bubble": {
+    "enabled": true,
     "displayIntervalMs": 300000,
     "displayDurationMs": 12000,
     "bubblePageDurationMs": 4000,
-    "bubbleBackgroundOpacity": 0.82
+    "bubbleBackgroundOpacity": 0.96
   },
   "focus": {
     "enabled": true,
-    "idleThresholdSeconds": 90,
+    "idleThresholdSeconds": 60,
     "pomodoroMinutes": 30
   },
+  "motion": {
+    "profileVersion": 4
+  },
   "progress": {
-    "celebrationDurationMs": 8000,
     "maximumHistory": 30,
     "focusMilestones": [
       { "thresholdSeconds": 1800, "title": "首次专注", "message": "30 分钟沉浸，继续保持！" },
@@ -45,6 +54,10 @@
       { "thresholdCount": 10000, "title": "万键里程碑", "message": "又完成一个万键篇章，继续前进！" }
     ]
   },
+  "celebrations": {
+    "enabled": true,
+    "durationMs": 8000
+  },
   "frameDurationMs": {
     "idle": 520,
     "running-right": 210,
@@ -58,15 +71,15 @@
     "look": 420
   },
   "frameDurationsMs": {
-    "idle": [280, 110, 110, 140, 140, 320],
-    "running-right": [120, 120, 120, 120, 120, 120, 120, 220],
-    "running-left": [120, 120, 120, 120, 120, 120, 120, 220],
-    "waving": [140, 140, 140, 280],
-    "jumping": [140, 140, 140, 140, 280],
-    "failed": [140, 140, 140, 140, 140, 140, 140, 240],
-    "waiting": [150, 150, 150, 150, 150, 260],
-    "running": [120, 120, 120, 120, 120, 220],
-    "review": [150, 150, 150, 150, 150, 280]
+    "idle": [360, 150, 110, 150, 180, 420],
+    "running-right": [105, 90, 115, 95, 105, 90, 115, 150],
+    "running-left": [105, 90, 115, 95, 105, 90, 115, 150],
+    "waving": [190, 135, 210, 330],
+    "jumping": [230, 125, 280, 145, 310],
+    "failed": [145, 165, 190, 230, 155, 360, 135, 330],
+    "waiting": [250, 180, 210, 260, 180, 380],
+    "running": [190, 170, 230, 260, 210, 340],
+    "review": [230, 170, 210, 250, 190, 360]
   },
   "holdMs": {
     "SessionStart": 800,

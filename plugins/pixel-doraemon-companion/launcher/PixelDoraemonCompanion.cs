@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Windows.Forms;
 
 internal static class PixelDoraemonCompanionLauncher
@@ -19,6 +20,8 @@ internal static class PixelDoraemonCompanionLauncher
             }
 
             string startScript = Path.Combine(pluginRoot, "scripts", "start-companion.ps1");
+            string launcherName = Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location);
+            string profile = launcherName.EndsWith("V3", StringComparison.OrdinalIgnoreCase) ? "v3" : "v2";
             string powershell = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.System),
                 "WindowsPowerShell",
@@ -27,7 +30,7 @@ internal static class PixelDoraemonCompanionLauncher
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = powershell;
-            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + startScript + "\"";
+            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + startScript + "\" -Profile " + profile;
             startInfo.WorkingDirectory = pluginRoot;
             startInfo.UseShellExecute = false;
             startInfo.CreateNoWindow = true;

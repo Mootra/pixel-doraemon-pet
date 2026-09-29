@@ -1,6 +1,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$PluginRoot,
     [Parameter(Mandatory = $true)][string]$DataRoot,
+    [string]$SharedDataRoot = "",
+    [ValidateSet("pixel-doraemon", "pixel-doraemon-v3")][string]$AssetPetId = "pixel-doraemon",
+    [ValidateSet("v2", "v3")][string]$InstanceName = "v2",
     [switch]$ValidateOnly,
     [string]$PreviewPath
 )
@@ -151,15 +154,20 @@ $frameCounts = @{
     "look" = 16
 }
 
+if ([string]::IsNullOrWhiteSpace($SharedDataRoot)) { $SharedDataRoot = $DataRoot }
 $configPath = Join-Path $DataRoot "config.json"
 $defaultConfigPath = Join-Path $PluginRoot "config\default-config.json"
-$statePath = Join-Path $DataRoot "pet-state.json"
+$statePath = Join-Path $SharedDataRoot "pet-state.json"
 $pidPath = Join-Path $DataRoot "overlay.pid"
-$usageStatePath = Join-Path $DataRoot "usage-state.json"
-$usagePidPath = Join-Path $DataRoot "usage-monitor.pid"
-$usageRefreshRequestPath = Join-Path $DataRoot "usage-refresh.request"
+$usageStatePath = Join-Path $SharedDataRoot "usage-state.json"
+$usagePidPath = Join-Path $SharedDataRoot "usage-monitor.pid"
+$usageRefreshRequestPath = Join-Path $SharedDataRoot "usage-refresh.request"
 $lookDirectionPath = Join-Path $PluginRoot "scripts\look-direction.ps1"
+$focusModelPath = Join-Path $PluginRoot "scripts\focus-model.ps1"
+$windowLayoutPath = Join-Path $PluginRoot "scripts\window-layout.ps1"
 . $lookDirectionPath
+. $focusModelPath
+. $windowLayoutPath
 
 $script:defaultConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $defaultConfigPath | ConvertFrom-Json
 $script:config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
@@ -179,15 +187,77 @@ function Get-ClampedConfigDouble($UserSection, $DefaultSection, [string]$Name, [
     return [Math]::Min($Maximum, [Math]::Max($Minimum, $value))
 }
 
+function Get-BubbleConfigValue([string]$Name) {
+    if ($null -ne $script:config.bubble -and $script:config.bubble.PSObject.Properties.Name -contains $Name) {
+        return $script:config.bubble.$Name
+    }
+    if ($null -ne $script:config.usage -and $script:config.usage.PSObject.Properties.Name -contains $Name) {
+        return $script:config.usage.$Name
+    }
+    return Get-ConfigValue $script:defaultConfig.bubble $null $Name
+}
+
+function Get-CelebrationConfigValue([string]$Name, [string]$LegacyName = $Name) {
+    if ($null -ne $script:config.celebrations -and $script:config.celebrations.PSObject.Properties.Name -contains $Name) {
+        return $script:config.celebrations.$Name
+    }
+    if ($null -ne $script:config.progress -and $script:config.progress.PSObject.Properties.Name -contains $LegacyName) {
+        return $script:config.progress.$LegacyName
+    }
+    return Get-ConfigValue $script:defaultConfig.celebrations $null $Name
+}
+
 function ConvertFrom-UnicodeCodePoints([int[]]$CodePoints) {
     return -join @($CodePoints | ForEach-Object { [char]$_ })
+}
+
+function Get-LegacyFocusStatePath {
+    $candidatePaths = New-Object System.Collections.Generic.List[string]
+    $directStatePath = Join-Path $DataRoot "focus-state.json"
+    if (Test-Path -LiteralPath $directStatePath) { [void]$candidatePaths.Add($directStatePath) }
+
+    $codexRoot = if ($env:CODEX_HOME) {
+        $env:CODEX_HOME
+    } else {
+        Join-Path ([Environment]::GetFolderPath("UserProfile")) ".codex"
+    }
+    $cacheRoot = Join-Path $codexRoot "plugins\cache"
+    if (Test-Path -LiteralPath $cacheRoot) {
+        $companionDirectories = @(
+            Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
+                Where-Object { $_.Name -eq "pixel-doraemon-companion" }
+        )
+        foreach ($versionDirectory in @($companionDirectories | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue })) {
+            $candidateStatePath = Join-Path $versionDirectory.FullName ".data\focus-state.json"
+            if (Test-Path -LiteralPath $candidateStatePath) { [void]$candidatePaths.Add($candidateStatePath) }
+        }
+    }
+
+    $today = [DateTime]::Now.ToString("yyyy-MM-dd")
+    $bestPath = $null
+    $bestUpdatedAt = [DateTime]::MinValue
+    foreach ($candidatePath in @($candidatePaths | Select-Object -Unique)) {
+        try {
+            $candidateState = Get-Content -Raw -Encoding UTF8 -LiteralPath $candidatePath | ConvertFrom-Json
+            if ([string]$candidateState.date -ne $today) { continue }
+            $updatedAt = [DateTime]::Parse([string]$candidateState.updatedAtUtc).ToUniversalTime()
+            if ($updatedAt -gt $bestUpdatedAt) {
+                $bestPath = $candidatePath
+                $bestUpdatedAt = $updatedAt
+            }
+        } catch {
+            # Ignore invalid legacy writes and continue looking for a valid daily state.
+        }
+    }
+    return $bestPath
 }
 
 function Get-SpriteCandidatePaths {
     $candidates = New-Object System.Collections.Generic.List[string]
     $preferInstalled = [bool](Get-ConfigValue $script:config.asset $script:defaultConfig.asset "preferInstalledCodexPet")
     if ($preferInstalled) {
-        $petId = [string](Get-ConfigValue $script:config.asset $script:defaultConfig.asset "petId")
+        $petId = $AssetPetId
         $codexRoot = if ($env:CODEX_HOME) {
             $env:CODEX_HOME
         } else {
@@ -211,7 +281,15 @@ function Get-SpriteCandidatePaths {
         }
     }
 
-    $bundledRelative = [string](Get-ConfigValue $script:config.asset $script:defaultConfig.asset "bundledPath")
+    $bundledRelative = ""
+    $bundledPaths = Get-ConfigValue $script:config.asset $script:defaultConfig.asset "bundledPaths"
+    if ($null -ne $bundledPaths) {
+        $profileAsset = $bundledPaths.PSObject.Properties[$AssetPetId]
+        if ($null -ne $profileAsset) { $bundledRelative = [string]$profileAsset.Value }
+    }
+    if ([string]::IsNullOrWhiteSpace($bundledRelative)) {
+        $bundledRelative = [string](Get-ConfigValue $script:config.asset $script:defaultConfig.asset "bundledPath")
+    }
     if ([string]::IsNullOrWhiteSpace($bundledRelative)) { $bundledRelative = "assets\spritesheet.png" }
     [void]$candidates.Add((Join-Path $PluginRoot $bundledRelative))
     return $candidates | Select-Object -Unique
@@ -250,20 +328,30 @@ function Load-SpriteBitmap {
 
 $scale = [double](Get-ConfigValue $script:config.window $script:defaultConfig.window "scale")
 $usageEnabled = [bool](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "enabled")
-$usageDisplayIntervalMs = [Math]::Max(1000, [int](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "displayIntervalMs"))
-$usageDisplayDurationMs = [Math]::Max(1000, [int](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "displayDurationMs"))
-$bubblePageDurationMs = [Math]::Max(1000, [int](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "bubblePageDurationMs"))
-$usageBubbleOpacity = Get-ClampedConfigDouble $script:config.usage $script:defaultConfig.usage "bubbleBackgroundOpacity" 0.15 1.0
 $focusEnabled = [bool](Get-ConfigValue $script:config.focus $script:defaultConfig.focus "enabled")
+$bubbleEnabled = [bool](Get-BubbleConfigValue "enabled") -and ($usageEnabled -or $focusEnabled)
+$usageDisplayIntervalMs = [Math]::Max(1000, [int](Get-BubbleConfigValue "displayIntervalMs"))
+$usageDisplayDurationMs = [Math]::Max(1000, [int](Get-BubbleConfigValue "displayDurationMs"))
+$bubblePageDurationMs = [Math]::Max(1000, [int](Get-BubbleConfigValue "bubblePageDurationMs"))
+$usageBubbleOpacity = [Math]::Min(1.0, [Math]::Max(0.15, [double](Get-BubbleConfigValue "bubbleBackgroundOpacity")))
 $focusIdleThresholdSeconds = [Math]::Max(15, [int](Get-ConfigValue $script:config.focus $script:defaultConfig.focus "idleThresholdSeconds"))
 $focusPomodoroSeconds = [Math]::Max(300, [int](Get-ConfigValue $script:config.focus $script:defaultConfig.focus "pomodoroMinutes") * 60)
-$focusStatePath = Join-Path $DataRoot "focus-state.json"
 $persistentDataRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "PixelDoraemonCompanion"
+$legacyFocusStatePath = Get-LegacyFocusStatePath
+$focusStatePath = Join-Path $persistentDataRoot "focus-state.json"
 $progressStatePath = Join-Path $persistentDataRoot "progress-state.json"
-$celebrationDurationMs = [Math]::Max(3000, [int](Get-ConfigValue $script:config.progress $script:defaultConfig.progress "celebrationDurationMs"))
+$celebrationsEnabled = [bool](Get-CelebrationConfigValue "enabled")
+$celebrationDurationMs = [Math]::Max(3000, [int](Get-CelebrationConfigValue "durationMs" "celebrationDurationMs"))
 $maximumProgressHistory = [Math]::Max(10, [int](Get-ConfigValue $script:config.progress $script:defaultConfig.progress "maximumHistory"))
 $focusMilestones = @(Get-ConfigValue $script:config.progress $script:defaultConfig.progress "focusMilestones")
 $keyboardMilestones = @(Get-ConfigValue $script:config.progress $script:defaultConfig.progress "keyboardMilestones")
+$defaultMotionProfileVersion = [int](Get-ConfigValue $script:defaultConfig.motion $null "profileVersion")
+$userMotionProfileVersion = [int](Get-ConfigValue $script:config.motion $null "profileVersion")
+$useUserMotionTimings = $userMotionProfileVersion -eq $defaultMotionProfileVersion
+$bubblePages = @()
+if ($usageEnabled) { $bubblePages += "usage" }
+if ($focusEnabled) { $bubblePages += @("focus", "keyboard") }
+$bubblePageCount = [Math]::Max(1, $bubblePages.Count)
 Load-SpriteBitmap
 
 if ($ValidateOnly) {
@@ -280,14 +368,29 @@ if ($ValidateOnly) {
         usageEnabled = $usageEnabled
         usageMonitorPath = (Join-Path $PluginRoot "scripts\usage-monitor.ps1")
         focusEnabled = $focusEnabled
+        instanceName = $InstanceName
+        assetPetId = $AssetPetId
+        dataRoot = $DataRoot
+        sharedDataRoot = $SharedDataRoot
+        bubbleEnabled = $bubbleEnabled
+        bubblePages = $bubblePages
+        celebrationsEnabled = $celebrationsEnabled
+        motionProfileVersion = $defaultMotionProfileVersion
+        userMotionTimingsActive = $useUserMotionTimings
         focusActivation = "keyboard-or-mouse-click"
         focusStatePath = $focusStatePath
+        legacyFocusStatePath = $legacyFocusStatePath
         progressStatePath = $progressStatePath
     } | ConvertTo-Json -Depth 4
     return
 }
 
-$script:singleInstanceMutex = New-Object System.Threading.Mutex($false, "Local\PixelDoraemonCompanion.Overlay")
+$mutexName = if ([string]::IsNullOrWhiteSpace($PreviewPath)) {
+    "Local\PixelDoraemonCompanion.Overlay"
+} else {
+    "Local\PixelDoraemonCompanion.Preview.$PID"
+}
+$script:singleInstanceMutex = New-Object System.Threading.Mutex($false, $mutexName)
 $script:ownsSingleInstanceMutex = $false
 try {
     $script:ownsSingleInstanceMutex = $script:singleInstanceMutex.WaitOne(0, $false)
@@ -308,11 +411,11 @@ $window.ShowInTaskbar = $false
 $window.Topmost = [bool](Get-ConfigValue $script:config.window $script:defaultConfig.window "topmost")
 $spriteDisplayWidth = [Math]::Round($frameWidth * $scale)
 $spriteDisplayHeight = [Math]::Round($frameHeight * $scale)
-$usageBubbleWidth = if ($usageEnabled) { [Math]::Max(210, [Math]::Round(260 * $scale)) } else { 0 }
-$usageBubbleHeight = if ($usageEnabled) { [Math]::Max(84, [Math]::Round(102 * $scale)) } else { 0 }
-$usagePanelHeight = if ($usageEnabled) { $usageBubbleHeight + 39 } else { 0 }
-$window.Width = if ($usageEnabled) {
-    [Math]::Max($spriteDisplayWidth, $usageBubbleWidth + 10)
+$usageBubbleWidth = if ($bubbleEnabled) { 224 } else { 0 }
+$usageBubbleHeight = if ($bubbleEnabled) { 88 } else { 0 }
+$usagePanelHeight = if ($bubbleEnabled) { 120 } else { 0 }
+$window.Width = if ($bubbleEnabled) {
+    [Math]::Max($spriteDisplayWidth, $usageBubbleWidth + 8)
 } else {
     $spriteDisplayWidth
 }
@@ -336,118 +439,233 @@ $usageMutedBrush = $brushConverter.ConvertFromString("#FF64748B")
 $usageBubbleFillBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb([byte][Math]::Round(255 * $usageBubbleOpacity), 255, 255, 255))
 $usageBubbleFillBrush.Freeze()
 
+$pixelGlyphs = @{
+    "0" = @("01110", "10001", "10011", "10101", "11001", "10001", "01110")
+    "1" = @("00100", "01100", "00100", "00100", "00100", "00100", "01110")
+    "2" = @("01110", "10001", "00001", "00010", "00100", "01000", "11111")
+    "3" = @("11110", "00001", "00001", "01110", "00001", "00001", "11110")
+    "4" = @("00010", "00110", "01010", "10010", "11111", "00010", "00010")
+    "5" = @("11111", "10000", "10000", "11110", "00001", "00001", "11110")
+    "6" = @("01110", "10000", "10000", "11110", "10001", "10001", "01110")
+    "7" = @("11111", "00001", "00010", "00100", "01000", "01000", "01000")
+    "8" = @("01110", "10001", "10001", "01110", "10001", "10001", "01110")
+    "9" = @("01110", "10001", "10001", "01111", "00001", "00001", "01110")
+    "%" = @("11001", "11010", "00100", "00100", "01000", "10110", "00110")
+    ":" = @("0", "1", "1", "0", "1", "1", "0")
+    "," = @("0", "0", "0", "0", "0", "1", "1")
+    "." = @("0", "0", "0", "0", "0", "0", "1")
+    "/" = @("00001", "00010", "00100", "00100", "01000", "10000", "00000")
+    "-" = @("00000", "00000", "00000", "11111", "00000", "00000", "00000")
+    " " = @("000", "000", "000", "000", "000", "000", "000")
+}
+
+function New-PixelStepGeometry([double]$X, [double]$Y, [double]$Width, [double]$Height, [double]$Step) {
+    $points = @(
+        [System.Windows.Point]::new($X + (2 * $Step), $Y),
+        [System.Windows.Point]::new($X + $Width - (2 * $Step), $Y),
+        [System.Windows.Point]::new($X + $Width - (2 * $Step), $Y + $Step),
+        [System.Windows.Point]::new($X + $Width - $Step, $Y + $Step),
+        [System.Windows.Point]::new($X + $Width - $Step, $Y + (2 * $Step)),
+        [System.Windows.Point]::new($X + $Width, $Y + (2 * $Step)),
+        [System.Windows.Point]::new($X + $Width, $Y + $Height - (2 * $Step)),
+        [System.Windows.Point]::new($X + $Width - $Step, $Y + $Height - (2 * $Step)),
+        [System.Windows.Point]::new($X + $Width - $Step, $Y + $Height - $Step),
+        [System.Windows.Point]::new($X + $Width - (2 * $Step), $Y + $Height - $Step),
+        [System.Windows.Point]::new($X + $Width - (2 * $Step), $Y + $Height),
+        [System.Windows.Point]::new($X + (2 * $Step), $Y + $Height),
+        [System.Windows.Point]::new($X + (2 * $Step), $Y + $Height - $Step),
+        [System.Windows.Point]::new($X + $Step, $Y + $Height - $Step),
+        [System.Windows.Point]::new($X + $Step, $Y + $Height - (2 * $Step)),
+        [System.Windows.Point]::new($X, $Y + $Height - (2 * $Step)),
+        [System.Windows.Point]::new($X, $Y + (2 * $Step)),
+        [System.Windows.Point]::new($X + $Step, $Y + (2 * $Step)),
+        [System.Windows.Point]::new($X + $Step, $Y + $Step),
+        [System.Windows.Point]::new($X + (2 * $Step), $Y + $Step)
+    )
+    $geometry = New-Object System.Windows.Media.StreamGeometry
+    $context = $geometry.Open()
+    try {
+        $context.BeginFigure($points[0], $true, $true)
+        for ($index = 1; $index -lt $points.Count; $index++) {
+            $context.LineTo($points[$index], $true, $false)
+        }
+    } finally {
+        $context.Close()
+    }
+    $geometry.Freeze()
+    return $geometry
+}
+
+function New-PixelFormattedText([string]$Text, [string]$FontFamily, [double]$FontSize, $Brush, [double]$MaximumWidth) {
+    $typeface = [System.Windows.Media.Typeface]::new(
+        [System.Windows.Media.FontFamily]::new($FontFamily),
+        [System.Windows.FontStyles]::Normal,
+        [System.Windows.FontWeights]::Bold,
+        [System.Windows.FontStretches]::Normal
+    )
+    $formatted = [System.Windows.Media.FormattedText]::new(
+        $Text,
+        [Globalization.CultureInfo]::CurrentUICulture,
+        [System.Windows.FlowDirection]::LeftToRight,
+        $typeface,
+        $FontSize,
+        $Brush,
+        1.0
+    )
+    $formatted.MaxTextWidth = $MaximumWidth
+    $formatted.Trimming = [System.Windows.TextTrimming]::CharacterEllipsis
+    return $formatted
+}
+
+function Draw-CenteredPixelText($DrawingContext, [string]$Text, [string]$FontFamily, [double]$FontSize, $Brush, [double]$Top, [double]$MaximumWidth) {
+    $formatted = New-PixelFormattedText $Text $FontFamily $FontSize $Brush $MaximumWidth
+    $left = [Math]::Round(($usageBubbleWidth - [Math]::Min($MaximumWidth, $formatted.WidthIncludingTrailingWhitespace)) / 2)
+    $DrawingContext.DrawText($formatted, [System.Windows.Point]::new($left, $Top))
+}
+
+function Draw-PixelValue($DrawingContext, [string]$Text, $Brush) {
+    $characters = $Text.ToCharArray()
+    $canUseGlyphs = $characters.Count -gt 0
+    $cell = 4
+    $gap = 4
+    $totalWidth = 0
+    foreach ($character in $characters) {
+        $key = [string]$character
+        if (-not $pixelGlyphs.ContainsKey($key)) {
+            $canUseGlyphs = $false
+            break
+        }
+        $totalWidth += ($pixelGlyphs[$key][0].Length * $cell) + $gap
+    }
+    if (-not $canUseGlyphs) {
+        Draw-CenteredPixelText $DrawingContext $Text "SimSun" 27 $Brush 26 204
+        return
+    }
+
+    $totalWidth -= $gap
+    $startX = [Math]::Round(($usageBubbleWidth - $totalWidth) / 2)
+    $shadowBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(110, 21, 59, 107))
+    foreach ($pass in @(
+        [pscustomobject]@{ offset = 2; brush = $shadowBrush },
+        [pscustomobject]@{ offset = 0; brush = $Brush }
+    )) {
+        $cursorX = $startX
+        foreach ($character in $characters) {
+            $pattern = $pixelGlyphs[[string]$character]
+            for ($row = 0; $row -lt $pattern.Count; $row++) {
+                for ($column = 0; $column -lt $pattern[$row].Length; $column++) {
+                    if ($pattern[$row][$column] -eq "1") {
+                        $DrawingContext.DrawRectangle(
+                            $pass.brush,
+                            $null,
+                            [System.Windows.Rect]::new(
+                                $cursorX + ($column * $cell) + $pass.offset,
+                                27 + ($row * $cell) + $pass.offset,
+                                $cell,
+                                $cell
+                            )
+                        )
+                    }
+                }
+            }
+            $cursorX += ($pattern[0].Length * $cell) + $gap
+        }
+    }
+}
+
+function Update-PixelBubbleImage {
+    if (-not $bubbleEnabled -or $null -eq $usageBubbleImage) { return }
+
+    $visual = New-Object System.Windows.Media.DrawingVisual
+    [System.Windows.Media.RenderOptions]::SetEdgeMode($visual, [System.Windows.Media.EdgeMode]::Aliased)
+    [System.Windows.Media.TextOptions]::SetTextFormattingMode($visual, [System.Windows.Media.TextFormattingMode]::Display)
+    [System.Windows.Media.TextOptions]::SetTextRenderingMode($visual, [System.Windows.Media.TextRenderingMode]::Aliased)
+    [System.Windows.Media.TextOptions]::SetTextHintingMode($visual, [System.Windows.Media.TextHintingMode]::Fixed)
+    $drawing = $visual.RenderOpen()
+    try {
+        $shadowBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(76, 0, 0, 0))
+        $drawing.DrawGeometry($shadowBrush, $null, (New-PixelStepGeometry 4 4 220 84 2))
+        $drawing.DrawGeometry($doraOutlineBrush, $null, (New-PixelStepGeometry 0 0 220 84 2))
+        $drawing.DrawGeometry($usageBubbleFillBrush, $null, (New-PixelStepGeometry 4 4 212 76 2))
+
+        $drawing.DrawGeometry($shadowBrush, $null, (New-PixelStepGeometry 150 90 24 14 2))
+        $drawing.DrawGeometry($doraOutlineBrush, $null, (New-PixelStepGeometry 148 88 24 14 2))
+        $drawing.DrawGeometry($usageBubbleFillBrush, $null, (New-PixelStepGeometry 152 92 16 6 1))
+        $drawing.DrawGeometry($shadowBrush, $null, (New-PixelStepGeometry 178 110 12 8 1))
+        $drawing.DrawGeometry($doraOutlineBrush, $null, (New-PixelStepGeometry 176 108 12 8 1))
+        $drawing.DrawRectangle($usageBubbleFillBrush, $null, [System.Windows.Rect]::new(180, 111, 4, 2))
+
+        $accentBrush = $usageHeaderDot.Fill
+        $drawing.DrawRectangle($accentBrush, $null, [System.Windows.Rect]::new(15, 14, 6, 6))
+
+        $title = New-PixelFormattedText $usageTitleText.Text "SimSun" 12 $doraOutlineBrush 142
+        $drawing.DrawText($title, [System.Windows.Point]::new(27, 9))
+
+        $indicator = New-PixelFormattedText $bubblePageIndicatorText.Text "Consolas" 10 $usageMutedBrush 42
+        $indicatorLeft = 205 - $indicator.WidthIncludingTrailingWhitespace
+        $drawing.DrawText($indicator, [System.Windows.Point]::new([Math]::Round($indicatorLeft), 10))
+
+        Draw-PixelValue $drawing $usageValueText.Text $usageValueText.Foreground
+        Draw-CenteredPixelText $drawing $usageDetailText.Text "SimSun" 11 $usageMutedBrush 66 198
+    } finally {
+        $drawing.Close()
+    }
+
+    $bitmap = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(
+        $usageBubbleWidth,
+        $usagePanelHeight,
+        96,
+        96,
+        [System.Windows.Media.PixelFormats]::Pbgra32
+    )
+    $bitmap.Render($visual)
+    $bitmap.Freeze()
+    $usageBubbleImage.Source = $bitmap
+}
+
 $usageCanvas = New-Object System.Windows.Controls.Canvas
 $usageCanvas.Width = $window.Width
 $usageCanvas.Height = $usagePanelHeight
-$usageCanvas.Visibility = if ($usageEnabled) {
+$usageCanvas.Visibility = if ($bubbleEnabled) {
     [System.Windows.Visibility]::Visible
 } else {
     [System.Windows.Visibility]::Collapsed
 }
 
-$tailLarge = New-Object System.Windows.Shapes.Ellipse
-$tailLarge.Width = 25
-$tailLarge.Height = 17
-$tailLarge.Fill = $usageBubbleFillBrush
-$tailLarge.Stroke = $doraOutlineBrush
-$tailLarge.StrokeThickness = 3
-[System.Windows.Controls.Canvas]::SetLeft($tailLarge, $window.Width - ($spriteDisplayWidth * 0.58))
-[System.Windows.Controls.Canvas]::SetTop($tailLarge, $usageBubbleHeight + 5)
-[void]$usageCanvas.Children.Add($tailLarge)
-
-$tailSmall = New-Object System.Windows.Shapes.Ellipse
-$tailSmall.Width = 13
-$tailSmall.Height = 9
-$tailSmall.Fill = $usageBubbleFillBrush
-$tailSmall.Stroke = $doraOutlineBrush
-$tailSmall.StrokeThickness = 2.5
-[System.Windows.Controls.Canvas]::SetLeft($tailSmall, $window.Width - ($spriteDisplayWidth * 0.48))
-[System.Windows.Controls.Canvas]::SetTop($tailSmall, $usageBubbleHeight + 26)
-[void]$usageCanvas.Children.Add($tailSmall)
-
-$usageBubble = New-Object System.Windows.Controls.Border
+$usageBubble = New-Object System.Windows.Controls.Grid
 $usageBubble.Width = $usageBubbleWidth
-$usageBubble.Height = $usageBubbleHeight
-$usageBubble.CornerRadius = New-Object System.Windows.CornerRadius([Math]::Round($usageBubbleHeight / 2))
-$usageBubble.Padding = New-Object System.Windows.Thickness(14, 4, 14, 4)
-$usageBubble.Background = $usageBubbleFillBrush
-$usageBubble.BorderBrush = $doraOutlineBrush
-$usageBubble.BorderThickness = New-Object System.Windows.Thickness(4)
+$usageBubble.Height = $usagePanelHeight
 $usageBubble.SnapsToDevicePixels = $true
-$usageBubble.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{
-    BlurRadius = 0
-    Color = [System.Windows.Media.Colors]::Black
-    Direction = 315
-    Opacity = 0.22
-    ShadowDepth = 3
-}
+$usageBubble.UseLayoutRounding = $true
 [System.Windows.Controls.Canvas]::SetLeft($usageBubble, 4)
-[System.Windows.Controls.Canvas]::SetTop($usageBubble, 2)
-
-$usageContent = New-Object System.Windows.Controls.Grid
-foreach ($height in @(16, 35, 15)) {
-    $row = New-Object System.Windows.Controls.RowDefinition
-    $row.Height = New-Object System.Windows.GridLength($height)
-    [void]$usageContent.RowDefinitions.Add($row)
-}
-
-$usageHeader = New-Object System.Windows.Controls.StackPanel
-$usageHeader.Orientation = [System.Windows.Controls.Orientation]::Horizontal
-$usageHeader.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
-$usageHeader.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+[System.Windows.Controls.Canvas]::SetTop($usageBubble, 0)
 
 $usageHeaderDot = New-Object System.Windows.Shapes.Ellipse
-$usageHeaderDot.Width = 7
-$usageHeaderDot.Height = 7
 $usageHeaderDot.Fill = $doraRedBrush
-$usageHeaderDot.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
-[void]$usageHeader.Children.Add($usageHeaderDot)
 
 $usageTitleText = New-Object System.Windows.Controls.TextBlock
 $usageTitleText.Text = "CODEX " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6))
 $usageTitleText.Foreground = $doraOutlineBrush
-$usageTitleText.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
-$usageTitleText.FontSize = 11.5
-$usageTitleText.FontWeight = [System.Windows.FontWeights]::Bold
-$usageTitleText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-[void]$usageHeader.Children.Add($usageTitleText)
 
 $bubblePageIndicatorText = New-Object System.Windows.Controls.TextBlock
 $bubblePageIndicatorText.Text = "1 / 3"
 $bubblePageIndicatorText.Foreground = $usageMutedBrush
-$bubblePageIndicatorText.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Segoe UI"
-$bubblePageIndicatorText.FontSize = 9.5
-$bubblePageIndicatorText.FontWeight = [System.Windows.FontWeights]::SemiBold
-$bubblePageIndicatorText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-$bubblePageIndicatorText.Margin = New-Object System.Windows.Thickness(7, 0, 0, 0)
-[void]$usageHeader.Children.Add($bubblePageIndicatorText)
-[System.Windows.Controls.Grid]::SetRow($usageHeader, 0)
-[void]$usageContent.Children.Add($usageHeader)
 
 $usageValueText = New-Object System.Windows.Controls.TextBlock
 $usageValueText.Text = "--"
 $usageValueText.Foreground = $doraBlueBrush
-$usageValueText.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Segoe UI"
-$usageValueText.FontSize = 30
-$usageValueText.FontWeight = [System.Windows.FontWeights]::Bold
-$usageValueText.TextAlignment = [System.Windows.TextAlignment]::Center
-$usageValueText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-[System.Windows.Controls.Grid]::SetRow($usageValueText, 1)
-[void]$usageContent.Children.Add($usageValueText)
 
 $usageDetailText = New-Object System.Windows.Controls.TextBlock
 $usageDetailText.Text = (ConvertFrom-UnicodeCodePoints @(0x6B63, 0x5728, 0x8BFB, 0x53D6)) + " Codex " + (ConvertFrom-UnicodeCodePoints @(0x7528, 0x91CF))
 $usageDetailText.Foreground = $usageMutedBrush
-$usageDetailText.FontFamily = New-Object System.Windows.Media.FontFamily -ArgumentList "Microsoft YaHei UI"
-$usageDetailText.FontSize = 10
-$usageDetailText.FontWeight = [System.Windows.FontWeights]::SemiBold
-$usageDetailText.TextAlignment = [System.Windows.TextAlignment]::Center
-$usageDetailText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-$usageDetailText.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
-[System.Windows.Controls.Grid]::SetRow($usageDetailText, 2)
-[void]$usageContent.Children.Add($usageDetailText)
 
-$usageBubble.Child = $usageContent
+$usageBubbleImage = New-Object System.Windows.Controls.Image
+$usageBubbleImage.Width = $usageBubbleWidth
+$usageBubbleImage.Height = $usagePanelHeight
+$usageBubbleImage.Stretch = [System.Windows.Media.Stretch]::None
+$usageBubbleImage.SnapsToDevicePixels = $true
+[System.Windows.Media.RenderOptions]::SetBitmapScalingMode($usageBubbleImage, [System.Windows.Media.BitmapScalingMode]::NearestNeighbor)
+[void]$usageBubble.Children.Add($usageBubbleImage)
 [void]$usageCanvas.Children.Add($usageBubble)
 [System.Windows.Controls.Grid]::SetRow($usageCanvas, 0)
 [void]$root.Children.Add($usageCanvas)
@@ -480,20 +698,21 @@ $script:lookActive = $false
 $script:lastLookStepAt = [DateTime]::MinValue
 $script:lastUsageStamp = $null
 $script:lastUsageMonitorCheck = [DateTime]::MinValue
-$script:usageBubbleVisible = $usageEnabled
-$script:usageBubbleUntil = if ($usageEnabled) {
+$script:usageBubbleVisible = $bubbleEnabled
+$script:usageBubbleUntil = if ($bubbleEnabled) {
     [DateTime]::UtcNow.AddMilliseconds($usageDisplayDurationMs)
 } else {
     [DateTime]::MinValue
 }
-$script:nextUsageBubbleAt = if ($usageEnabled) {
+$script:nextUsageBubbleAt = if ($bubbleEnabled) {
     [DateTime]::UtcNow.AddMilliseconds($usageDisplayIntervalMs)
 } else {
     [DateTime]::MaxValue
 }
 $script:focusDate = [DateTime]::Now.ToString("yyyy-MM-dd")
 $script:focusActiveSeconds = 0
-$script:focusPomodoroElapsedSeconds = 0
+$script:currentFocusSessionSeconds = 0
+$script:focusRoundElapsedSeconds = 0
 $script:focusCompletedPomodoros = 0
 $script:keyboardPresses = 0
 $script:keyboardCounterAvailable = $focusEnabled
@@ -510,15 +729,16 @@ $script:progressHistory = @()
 $script:activeCelebration = $null
 $script:celebrationQueue = @()
 $script:celebrationUntil = [DateTime]::MinValue
-$script:usageMinimumRemaining = $null
+$script:usagePrimaryRemaining = $null
 $script:usageDetailLabel = ConvertFrom-UnicodeCodePoints @(0x6B63, 0x5728, 0x8BFB, 0x53D6)
 $script:usageTooltip = ""
 $script:bubblePage = 0
 $script:lastBubblePageChangedAt = [DateTime]::UtcNow
 
 function Set-UsageBubbleVisible([bool]$Visible) {
-    if (-not $usageEnabled -or $script:usageBubbleVisible -eq $Visible) { return }
+    if (-not $bubbleEnabled -or $script:usageBubbleVisible -eq $Visible) { return }
 
+    $preservedWindowTop = Get-WindowTopPreservingSpriteAnchor $window.Top $script:usageBubbleVisible $Visible $usagePanelHeight
     $script:usageBubbleVisible = $Visible
     $usageCanvas.Visibility = if ($Visible) {
         [System.Windows.Visibility]::Visible
@@ -527,11 +747,11 @@ function Set-UsageBubbleVisible([bool]$Visible) {
     }
     $usageRow.Height = New-Object System.Windows.GridLength($(if ($Visible) { $usagePanelHeight } else { 0 }))
     $window.Height = $spriteDisplayHeight + $(if ($Visible) { $usagePanelHeight } else { 0 })
-    $window.Top = $workArea.Bottom - $window.Height - 40
+    $window.Top = $preservedWindowTop
 }
 
 function Update-UsageBubbleSchedule {
-    if (-not $usageEnabled) { return }
+    if (-not $bubbleEnabled) { return }
 
     $now = [DateTime]::UtcNow
     if ($script:usageBubbleVisible -and $now -ge $script:usageBubbleUntil) {
@@ -545,7 +765,7 @@ function Update-UsageBubbleSchedule {
 }
 
 function Show-UsageBubbleFromInteraction {
-    if (-not $usageEnabled) { return }
+    if (-not $bubbleEnabled) { return }
 
     $wasVisible = $script:usageBubbleVisible
     Update-UsageDisplay
@@ -555,7 +775,13 @@ function Show-UsageBubbleFromInteraction {
 }
 
 function Format-FocusDuration([int]$Seconds) {
-    return ("{0:00}:{1:00}" -f [Math]::Floor($Seconds / 60), ($Seconds % 60))
+    $hours = [Math]::Floor($Seconds / 3600)
+    $minutes = [Math]::Floor(($Seconds % 3600) / 60)
+    $remainingSeconds = $Seconds % 60
+    if ($hours -gt 0) {
+        return ("{0}:{1:00}:{2:00}" -f $hours, $minutes, $remainingSeconds)
+    }
+    return ("{0:00}:{1:00}" -f $minutes, $remainingSeconds)
 }
 
 function Get-AppStatLabel($Stats) {
@@ -612,6 +838,11 @@ function Initialize-ProgressState {
             }
             if ($null -ne $stored.history) {
                 $script:progressHistory = @($stored.history | Select-Object -First $maximumProgressHistory)
+                foreach ($event in $script:progressHistory) {
+                    if ([string]$event.kind -eq "focus-round" -and [string]$event.value -like "*{0}*" -and [string]$event.id -match '^focus-round-(\d+)$') {
+                        $event.value = Format-FocusRoundLabel (ConvertFrom-UnicodeCodePoints @(0x7B2C)) ([int]$Matches[1]) (ConvertFrom-UnicodeCodePoints @(0x8F6E))
+                    }
+                }
             }
         } catch {
             # Preserve a usable companion when an interrupted write left invalid progress data.
@@ -626,6 +857,7 @@ function Initialize-ProgressState {
 }
 
 function Show-Celebration([string]$Kind, [string]$Title, [string]$Value, [string]$Message) {
+    if (-not $celebrationsEnabled -or -not $bubbleEnabled) { return }
     $celebration = [pscustomobject]@{
         kind = $Kind
         title = $Title
@@ -707,7 +939,8 @@ function Show-FocusDashboard {
 
     foreach ($line in @(
         ((ConvertFrom-UnicodeCodePoints @(0x6709, 0x6548, 0x4E13, 0x6CE8)) + ": " + (Format-FocusDuration $script:focusActiveSeconds)),
-        ((ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x8F6E)) + ": " + (Format-FocusDuration $script:focusPomodoroElapsedSeconds) + " / " + (Format-FocusDuration $focusPomodoroSeconds)),
+        ((ConvertFrom-UnicodeCodePoints @(0x672C, 0x6B21, 0x4E13, 0x6CE8)) + ": " + (Format-FocusDuration $script:currentFocusSessionSeconds)),
+        ((ConvertFrom-UnicodeCodePoints @(0x5F53, 0x524D, 0x8F6E, 0x8FDB, 0x5EA6)) + ": " + (Format-FocusDuration $script:focusRoundElapsedSeconds) + " / " + (Format-FocusDuration $focusPomodoroSeconds)),
         ((ConvertFrom-UnicodeCodePoints @(0x5B8C, 0x6210, 0x8F6E, 0x6570)) + ": " + $script:focusCompletedPomodoros),
         ((ConvertFrom-UnicodeCodePoints @(0x8BA1, 0x65F6, 0x89E6, 0x53D1)) + ": " + (ConvertFrom-UnicodeCodePoints @(0x952E, 0x76D8, 0x6309, 0x4E0B, 0x6216, 0x9F20, 0x6807, 0x70B9, 0x51FB))),
         ((ConvertFrom-UnicodeCodePoints @(0x952E, 0x76D8, 0x6572, 0x51FB)) + ": " + ("{0:N0}" -f $script:keyboardPresses)),
@@ -755,7 +988,7 @@ function Show-FocusDashboard {
 }
 
 function Update-BubblePage {
-    if (-not $usageEnabled) { return }
+    if (-not $bubbleEnabled) { return }
 
     if ($null -ne $script:activeCelebration) {
         if ([DateTime]::UtcNow -lt $script:celebrationUntil) {
@@ -778,27 +1011,26 @@ function Update-BubblePage {
         $script:activeCelebration = $null
     }
 
-    $bubblePageIndicatorText.Text = "{0} / 3" -f ($script:bubblePage + 1)
-    switch ($script:bubblePage) {
-        0 {
+    $bubblePageIndicatorText.Text = "{0} / {1}" -f ($script:bubblePage + 1), $bubblePages.Count
+    switch ($bubblePages[$script:bubblePage]) {
+        "usage" {
             $usageHeaderDot.Fill = $doraRedBrush
             $usageTitleText.Text = "CODEX " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6))
-            if ($null -eq $script:usageMinimumRemaining) {
+            if ($null -eq $script:usagePrimaryRemaining) {
                 $usageValueText.Text = "--"
                 $usageValueText.Foreground = $usageMutedBrush
             } else {
-                $usageValueText.Text = "{0}%" -f $script:usageMinimumRemaining
-                $usageValueText.Foreground = if ($script:usageMinimumRemaining -le 20) { $doraRedBrush } elseif ($script:usageMinimumRemaining -le 50) { $brushConverter.ConvertFromString("#FFC88600") } else { $doraBlueBrush }
+                $usageValueText.Text = "{0}%" -f $script:usagePrimaryRemaining
+                $usageValueText.Foreground = if ($script:usagePrimaryRemaining -le 20) { $doraRedBrush } elseif ($script:usagePrimaryRemaining -le 50) { $brushConverter.ConvertFromString("#FFC88600") } else { $doraBlueBrush }
             }
             $usageDetailText.Text = $script:usageDetailLabel
         }
-        1 {
+        "focus" {
             $usageHeaderDot.Fill = if ($script:focusIsActive) { $doraBlueBrush } else { $usageMutedBrush }
             $usageTitleText.Text = ConvertFrom-UnicodeCodePoints @(0x4E13, 0x6CE8, 0x65F6, 0x95F4)
-            $usageValueText.Text = Format-FocusDuration $script:focusPomodoroElapsedSeconds
+            $usageValueText.Text = Format-FocusDuration $script:currentFocusSessionSeconds
             $usageValueText.Foreground = if ($script:focusIsActive) { $doraBlueBrush } else { $usageMutedBrush }
-            $stateLabel = if ($script:focusIsActive) { ConvertFrom-UnicodeCodePoints @(0x6B63, 0x5728, 0x4E13, 0x6CE8) } else { ConvertFrom-UnicodeCodePoints @(0x6682, 0x505C, 0x8BA1, 0x65F6) }
-            $usageDetailText.Text = "$stateLabel  " + (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5)) + " " + (Format-FocusDuration $script:focusActiveSeconds) + "  /  " + (ConvertFrom-UnicodeCodePoints @(0x603B, 0x8BA1)) + " " + (Format-FocusDuration $script:totalFocusSeconds)
+            $usageDetailText.Text = (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5, 0x4E13, 0x6CE8)) + " " + (Format-FocusDuration $script:focusActiveSeconds) + "  /  " + (ConvertFrom-UnicodeCodePoints @(0x7D2F, 0x8BA1, 0x4E13, 0x6CE8)) + " " + (Format-FocusDuration $script:totalFocusSeconds)
         }
         default {
             $usageHeaderDot.Fill = $doraYellowBrush
@@ -808,10 +1040,11 @@ function Update-BubblePage {
             $usageDetailText.Text = (ConvertFrom-UnicodeCodePoints @(0x4ECA, 0x65E5)) + " " + ("{0:N0}" -f $script:keyboardPresses) + "  /  " + (ConvertFrom-UnicodeCodePoints @(0x603B, 0x8BA1)) + " " + ("{0:N0}" -f $script:totalKeyboardPresses)
         }
     }
+    Update-PixelBubbleImage
 }
 
 function Set-BubblePage([int]$Page) {
-    $script:bubblePage = (($Page % 3) + 3) % 3
+    $script:bubblePage = (($Page % $bubblePageCount) + $bubblePageCount) % $bubblePageCount
     $script:lastBubblePageChangedAt = [DateTime]::UtcNow
     Update-BubblePage
 }
@@ -821,7 +1054,7 @@ function Show-NextBubblePage {
 }
 
 function Update-BubblePageRotation {
-    if (-not $usageEnabled -or -not $script:usageBubbleVisible) { return }
+    if (-not $bubbleEnabled -or -not $script:usageBubbleVisible) { return }
     if ($null -ne $script:activeCelebration -and [DateTime]::UtcNow -lt $script:celebrationUntil) { return }
     if (([DateTime]::UtcNow - $script:lastBubblePageChangedAt).TotalMilliseconds -ge $bubblePageDurationMs) {
         Show-NextBubblePage
@@ -851,13 +1084,15 @@ function Update-FocusDisplay {
 function Write-FocusState {
     if (-not $focusEnabled) { return }
 
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $focusStatePath) | Out-Null
     $state = [ordered]@{
         schemaVersion = 1
         date = $script:focusDate
         activeSeconds = $script:focusActiveSeconds
         keyboardPresses = $script:keyboardPresses
         keyboardCounterAvailable = $script:keyboardCounterAvailable
-        pomodoroElapsedSeconds = $script:focusPomodoroElapsedSeconds
+        currentSessionSeconds = $script:currentFocusSessionSeconds
+        focusRoundElapsedSeconds = $script:focusRoundElapsedSeconds
         completedPomodoros = $script:focusCompletedPomodoros
         isActive = $script:focusIsActive
         idleSeconds = $script:focusIdleSeconds
@@ -870,18 +1105,37 @@ function Write-FocusState {
 }
 
 function Initialize-FocusState {
-    if (-not $focusEnabled -or -not (Test-Path -LiteralPath $focusStatePath)) {
+    if (-not $focusEnabled) {
+        Update-FocusDisplay
+        return
+    }
+    $stateSourcePath = if (Test-Path -LiteralPath $focusStatePath) {
+        $focusStatePath
+    } elseif (Test-Path -LiteralPath $legacyFocusStatePath) {
+        $legacyFocusStatePath
+    } else {
+        $null
+    }
+    if ($null -eq $stateSourcePath) {
         Update-FocusDisplay
         return
     }
     try {
-        $stored = Get-Content -Raw -Encoding UTF8 -LiteralPath $focusStatePath | ConvertFrom-Json
+        $stored = Get-Content -Raw -Encoding UTF8 -LiteralPath $stateSourcePath | ConvertFrom-Json
         if ([string]$stored.date -eq $script:focusDate) {
             $script:focusActiveSeconds = [int]$stored.activeSeconds
-            $script:focusPomodoroElapsedSeconds = [int]$stored.pomodoroElapsedSeconds
+            if ($stateSourcePath -eq $focusStatePath -and $stored.PSObject.Properties.Name -contains "currentSessionSeconds") {
+                $script:currentFocusSessionSeconds = [int]$stored.currentSessionSeconds
+                $script:focusRoundElapsedSeconds = if ($stored.PSObject.Properties.Name -contains "focusRoundElapsedSeconds") {
+                    [int]$stored.focusRoundElapsedSeconds
+                } else {
+                    [int]$stored.currentSessionSeconds % $focusPomodoroSeconds
+                }
+            }
             $script:focusCompletedPomodoros = [int]$stored.completedPomodoros
             $script:keyboardPresses = [int]$stored.keyboardPresses
         }
+        if ($stateSourcePath -ne $focusStatePath) { Write-FocusState }
     } catch {
         # Start a fresh daily tally if an interrupted write left an invalid state file.
     }
@@ -901,13 +1155,17 @@ function Update-FocusTracking {
     if ($today -ne $script:focusDate) {
         $script:focusDate = $today
         $script:focusActiveSeconds = 0
-        $script:focusPomodoroElapsedSeconds = 0
+        $script:currentFocusSessionSeconds = 0
+        $script:focusRoundElapsedSeconds = 0
         $script:focusCompletedPomodoros = 0
         $script:keyboardPresses = 0
     }
 
     $script:focusIdleSeconds = [Math]::Floor([double][PixelDoraemon.FocusNative]::GetActivityIdleMilliseconds() / 1000)
-    $script:focusIsActive = $script:focusIdleSeconds -le $focusIdleThresholdSeconds
+    $script:focusIsActive = $script:focusIdleSeconds -lt $focusIdleThresholdSeconds
+    $focusCounters = Get-NextFocusCounters $script:focusIsActive $elapsedSeconds $script:currentFocusSessionSeconds $script:focusRoundElapsedSeconds $focusPomodoroSeconds
+    $script:currentFocusSessionSeconds = $focusCounters.currentSessionSeconds
+    $script:focusRoundElapsedSeconds = $focusCounters.focusRoundElapsedSeconds
 
     if ($script:keyboardCounterAvailable) {
         $newKeyboardPresses = [int][PixelDoraemon.FocusNative]::ConsumeKeyboardPresses()
@@ -920,17 +1178,17 @@ function Update-FocusTracking {
 
     if ($script:focusIsActive) {
         $script:focusActiveSeconds += $elapsedSeconds
-        $script:focusPomodoroElapsedSeconds += $elapsedSeconds
         $script:totalFocusSeconds += $elapsedSeconds
-        if ($script:focusPomodoroElapsedSeconds -ge $focusPomodoroSeconds) {
-            $newCompletedRounds = [int][Math]::Floor($script:focusPomodoroElapsedSeconds / $focusPomodoroSeconds)
+        if ($focusCounters.completedRounds -gt 0) {
+            $newCompletedRounds = [int]$focusCounters.completedRounds
             $script:focusCompletedPomodoros += $newCompletedRounds
             $script:totalCompletedFocusRounds += $newCompletedRounds
-            $script:focusPomodoroElapsedSeconds %= $focusPomodoroSeconds
             $roundTitle = "30 " + (ConvertFrom-UnicodeCodePoints @(0x5206, 0x949F, 0x4E13, 0x6CE8, 0x5B8C, 0x6210))
-            $roundValue = (ConvertFrom-UnicodeCodePoints @(0x7B2C)) + " {0} " + (ConvertFrom-UnicodeCodePoints @(0x8F6E)) -f $script:totalCompletedFocusRounds
             $roundMessage = ConvertFrom-UnicodeCodePoints @(0x8FD9, 0x4E00, 0x6BB5, 0x4E13, 0x6CE8, 0x5DF2, 0x7ECF, 0x6C89, 0x6DC0, 0x6210, 0x4F60, 0x7684, 0x8282, 0x594F)
-            Add-ProgressEvent ("focus-round-{0}" -f $script:totalCompletedFocusRounds) "focus-round" $roundTitle $roundValue $roundMessage $true
+            foreach ($roundNumber in (($script:totalCompletedFocusRounds - $newCompletedRounds + 1)..$script:totalCompletedFocusRounds)) {
+                $roundValue = Format-FocusRoundLabel (ConvertFrom-UnicodeCodePoints @(0x7B2C)) $roundNumber (ConvertFrom-UnicodeCodePoints @(0x8F6E))
+                Add-ProgressEvent ("focus-round-{0}" -f $roundNumber) "focus-round" $roundTitle $roundValue $roundMessage $true
+            }
         }
         Check-ProgressMilestones
     }
@@ -966,7 +1224,7 @@ function Start-UsageMonitor {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", ('"{0}"' -f $monitorPath),
-        "-DataRoot", ('"{0}"' -f $DataRoot),
+        "-DataRoot", ('"{0}"' -f $SharedDataRoot),
         "-PollMs", $pollMs,
         "-OwnerPid", $PID
     )
@@ -991,7 +1249,7 @@ function Get-UsageResetLabel($EpochSeconds) {
 }
 
 function Set-UsageUnavailable([string]$Reason) {
-    $script:usageMinimumRemaining = $null
+    $script:usagePrimaryRemaining = $null
     $script:usageDetailLabel = ConvertFrom-UnicodeCodePoints @(0x989D, 0x5EA6, 0x6682, 0x4E0D, 0x53EF, 0x7528)
     $usageBubble.ToolTip = if ([string]::IsNullOrWhiteSpace($Reason)) {
         "Codex " + (ConvertFrom-UnicodeCodePoints @(0x5269, 0x4F59, 0x989D, 0x5EA6, 0x6682, 0x4E0D, 0x53EF, 0x7528))
@@ -1018,11 +1276,13 @@ function Update-UsageDisplay {
         $labelParts = New-Object System.Collections.Generic.List[string]
         $detailParts = New-Object System.Collections.Generic.List[string]
         $remainingValues = New-Object System.Collections.Generic.List[int]
+        $primaryRemaining = $null
         $showResetTime = [bool](Get-ConfigValue $script:config.usage $script:defaultConfig.usage "showResetTime")
         foreach ($usageWindow in @($state.windows)) {
             $duration = Get-UsageDurationLabel $usageWindow.windowDurationMins
             $remaining = [int]$usageWindow.remainingPercent
             [void]$remainingValues.Add($remaining)
+            if ([string]$usageWindow.kind -eq "primary") { $primaryRemaining = $remaining }
             [void]$labelParts.Add(("{0} {1}%" -f $duration, $remaining))
 
             $detail = "{0}" + (ConvertFrom-UnicodeCodePoints @(0x7A97, 0x53E3, 0xFF1A, 0x5269, 0x4F59)) + " {1}%" -f $duration, $remaining
@@ -1051,12 +1311,13 @@ function Update-UsageDisplay {
         [void]$tooltip.Add(((ConvertFrom-UnicodeCodePoints @(0x66F4, 0x65B0, 0x65F6, 0x95F4)) + ": {0}" -f ([DateTime]$state.timestampUtc).ToLocalTime().ToString("HH:mm:ss")))
         $usageBubble.ToolTip = $tooltip -join "`n"
 
-        $minimumRemaining = if ($remainingValues.Count -gt 0) {
-            ($remainingValues | Measure-Object -Minimum).Minimum
+        $script:usagePrimaryRemaining = if ($null -ne $primaryRemaining) {
+            [int]$primaryRemaining
+        } elseif ($remainingValues.Count -gt 0) {
+            [int]$remainingValues[0]
         } else {
             100
         }
-        $script:usageMinimumRemaining = if ($remainingValues.Count -gt 0) { [int]$minimumRemaining } else { 100 }
         $script:usageDetailLabel = if ($remainingValues.Count -gt 0) {
             $labelParts -join ("  " + [char]0x00B7 + "  ")
         } else {
@@ -1158,7 +1419,7 @@ function Get-StableLookFrame {
 
 function Get-FrameDuration([string]$Action, [int]$Frame) {
     $durations = $null
-    if ($null -ne $script:config.frameDurationsMs) { $durations = $script:config.frameDurationsMs.$Action }
+    if ($useUserMotionTimings -and $null -ne $script:config.frameDurationsMs) { $durations = $script:config.frameDurationsMs.$Action }
     if ($null -eq $durations -and $null -ne $script:defaultConfig.frameDurationsMs) {
         $durations = $script:defaultConfig.frameDurationsMs.$Action
     }
@@ -1167,7 +1428,7 @@ function Get-FrameDuration([string]$Action, [int]$Frame) {
     }
 
     $fallback = $null
-    if ($null -ne $script:config.frameDurationMs) { $fallback = $script:config.frameDurationMs.$Action }
+    if ($useUserMotionTimings -and $null -ne $script:config.frameDurationMs) { $fallback = $script:config.frameDurationMs.$Action }
     if ($null -eq $fallback -and $null -ne $script:defaultConfig.frameDurationMs) {
         $fallback = $script:defaultConfig.frameDurationMs.$Action
     }
@@ -1397,6 +1658,7 @@ $restartItem.Add_Click({
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", ('"{0}"' -f $launcherPath),
+        "-Profile", $InstanceName,
         "-Restart"
     ) -WindowStyle Hidden | Out-Null
 })

@@ -45,8 +45,42 @@ function Test-ToolFailure($Payload) {
     return $serialized -match '"(success|ok)":false|"is_error":true|"exit_code":[1-9][0-9]*'
 }
 
-function Start-Companion([string]$PluginRoot, [string]$DataRoot) {
-    $pidPath = Join-Path $DataRoot "overlay.pid"
+function Get-LaunchProfile {
+    if (-not [string]::IsNullOrWhiteSpace($env:PIXEL_DORAEMON_PROFILE)) {
+        return [string]$env:PIXEL_DORAEMON_PROFILE
+    }
+
+    $activeProfilePath = Join-Path (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "PixelDoraemonCompanion") "active-profile.json"
+    if (Test-Path -LiteralPath $activeProfilePath) {
+        try {
+            $active = Get-Content -Raw -Encoding UTF8 -LiteralPath $activeProfilePath | ConvertFrom-Json
+            if ([string]$active.profile -in @("v2", "v3")) { return [string]$active.profile }
+        } catch {
+            # Invalid selection falls back to the original v2 companion.
+        }
+    }
+    return "v2"
+}
+
+function Start-Companion([string]$PluginRoot, [string]$SharedDataRoot, [string]$Profile) {
+    $petId = if ($Profile -eq "v3") { "pixel-doraemon-v3" } else { "pixel-doraemon" }
+    $profileDataRoot = if (-not [string]::IsNullOrWhiteSpace($env:PIXEL_DORAEMON_PROFILE_DATA)) {
+        [string]$env:PIXEL_DORAEMON_PROFILE_DATA
+    } else {
+        Join-Path (Join-Path (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "PixelDoraemonCompanion") "profiles") $Profile
+    }
+    New-Item -ItemType Directory -Force -Path $profileDataRoot | Out-Null
+    $profileConfigPath = Join-Path $profileDataRoot "config.json"
+    if (-not (Test-Path -LiteralPath $profileConfigPath)) {
+        Copy-Item -LiteralPath (Join-Path $PluginRoot "config\default-config.json") -Destination $profileConfigPath
+    }
+    $profileConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $profileConfigPath | ConvertFrom-Json
+    if ([string]$profileConfig.asset.petId -ne $petId) {
+        $profileConfig.asset.petId = $petId
+        $profileConfig | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $profileConfigPath -Encoding UTF8
+    }
+
+    $pidPath = Join-Path $profileDataRoot "overlay.pid"
     if (Test-Path $pidPath) {
         $existingPid = Get-Content -LiteralPath $pidPath -Encoding ASCII -ErrorAction SilentlyContinue
         if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) { return }
@@ -59,7 +93,10 @@ function Start-Companion([string]$PluginRoot, [string]$DataRoot) {
         "-STA",
         "-File", ('"{0}"' -f $overlayPath),
         "-PluginRoot", ('"{0}"' -f $PluginRoot),
-        "-DataRoot", ('"{0}"' -f $DataRoot)
+        "-DataRoot", ('"{0}"' -f $profileDataRoot),
+        "-SharedDataRoot", ('"{0}"' -f $SharedDataRoot),
+        "-AssetPetId", $petId,
+        "-InstanceName", $Profile
     )
     Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden | Out-Null
 }
@@ -67,6 +104,7 @@ function Start-Companion([string]$PluginRoot, [string]$DataRoot) {
 $pluginRoot = Get-PluginPath
 $dataRoot = Get-DataPath $pluginRoot
 New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+$launchProfile = Get-LaunchProfile
 
 $defaultConfigPath = Join-Path $pluginRoot "config\default-config.json"
 $userConfigPath = Join-Path $dataRoot "config.json"
@@ -109,5 +147,5 @@ $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tempPath -Encoding 
 Move-Item -Force -LiteralPath $tempPath -Destination $statePath
 
 if (-not $NoLaunch) {
-    Start-Companion $pluginRoot $dataRoot
+    Start-Companion $pluginRoot $dataRoot $launchProfile
 }

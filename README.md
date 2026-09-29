@@ -10,6 +10,8 @@ Companion 提供本地鼠标注视、中文道具菜单、Codex 生命周期动�
 
 ## 动画预览
 
+当前发布版的完整 11 行动作以 [`qa/current/contact-sheet.png`](qa/current/contact-sheet.png) 为准；它直接从 `output-v3/spritesheet.png` 生成，并在 [`qa/current/source.json`](qa/current/source.json) 中记录来源哈希。`run/` 和 `qa/archive/` 只保存生成过程或历史材料，不代表当前安装版本。
+
 | 待机 | 挥手 | 竹蜻蜓 |
 | --- | --- | --- |
 | ![待机](qa/animations/idle.gif) | ![挥手](qa/animations/waving.gif) | ![竹蜻蜓](qa/animations/jumping.gif) |
@@ -26,6 +28,8 @@ Companion 提供本地鼠标注视、中文道具菜单、Codex 生命周期动�
 | Companion 插件 | 想要额度气泡、中文菜单和更多桌面互动 | Windows 独立透明悬浮窗，通过 Codex hooks 获取状态 |
 
 两者相互独立。若不想看到两个哆啦A梦，只启用其中一种即可。
+
+Companion 的手动入口也按素材版本隔离：桌面上的“启动哆啦A梦伙伴”固定使用旧 v2（`pixel-doraemon`），“启动哆啦A梦 V3伙伴”固定使用 v3（`pixel-doraemon-v3`）。两个入口拥有独立配置和 PID；启动另一个版本会切换当前伙伴，同一时刻只运行一个，避免专注计数重复。
 
 ## 动作与触发方式
 

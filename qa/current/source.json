@@ -1,0 +1,12 @@
+{
+  "petId": "pixel-doraemon-v3",
+  "spriteVersionNumber": 2,
+  "source": "../../output-v3/spritesheet.png",
+  "sourceSha256": "7EC2171A725C2E39996689A6816C397C80EAEC205CFF7D188068EFDFE244EBA1",
+  "contactSheet": "contact-sheet.png",
+  "contactSheetSha256": "01F8599EB254CC83D7C1AD059F2AD7399096D62B2C73ADD0319FDBD772FE9EC5",
+  "lookDirections": "look-directions.png",
+  "lookDirectionsSha256": "A3FF1ADB9210D732DC9B85250B78EB5C47B0D5C1F1B574658258EBFE80ABB427",
+  "classification": "current-published-release",
+  "generatedOn": "2026-08-30"
+}

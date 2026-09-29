@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "chroma_key": {
+    "hex": "#FF00FF",
+    "rgb": [
+      255,
+      0,
+      255
+    ],
+    "threshold": 96.0
+  },
+  "rows": [
+    {
+      "state": "waiting",
+      "frames": [
+        "F:\\pet\\pixel-doraemon-pet\\qa\\runs\\pixel-doraemon-v4\\qa\\rows\\waiting\\frames\\waiting\\00.png",
+        "F:\\pet\\pixel-doraemon-pet\\qa\\runs\\pixel-doraemon-v4\\qa\\rows\\waiting\\frames\\waiting\\01.png",
+        "F:\\pet\\pixel-doraemon-pet\\qa\\runs\\pixel-doraemon-v4\\qa\\rows\\waiting\\frames\\waiting\\02.png",
+        "F:\\pet\\pixel-doraemon-pet\\qa\\runs\\pixel-doraemon-v4\\qa\\rows\\waiting\\frames\\waiting\\03.png",
+        "F:\\pet\\pixel-doraemon-pet\\qa\\runs\\pixel-doraemon-v4\\qa\\rows\\waiting\\frames\\waiting\\04.png",
+        "F:\\pet\\pixel-doraemon-pet\\qa\\runs\\pixel-doraemon-v4\\qa\\rows\\waiting\\frames\\waiting\\05.png"
+      ],
+      "method": "components"
+    }
+  ]
+}
